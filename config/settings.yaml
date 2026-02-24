@@ -1,10 +1,10 @@
 telegram:
   bot_token: "${TG_BOT_TOKEN}"
-  allowed_user_ids: [123456789]  # replace with your Telegram user ID
+  allowed_user_ids: [470241971]  # replace with your Telegram user ID
 
 openrouter:
   api_key: "${OPENROUTER_API_KEY}"
-  model: "google/gemini-2.0-flash-001"
+  model: "google/gemini-2.5-flash-lite-preview-09-2025"
 
 vault:
   repo_path: "/vault"
