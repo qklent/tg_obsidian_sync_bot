@@ -1,0 +1,52 @@
+folders:
+  - path: "ege"
+    description: "ЕГЭ exam preparation materials and review notes"
+  - path: "eng"
+    description: "English learning: grammar rules, vocabulary, homework, essays"
+    children:
+      - path: "eng/behave"
+        description: "Behavioral interview answers and practice in English"
+  - path: "headaches"
+    description: "Headache diary and health tracking"
+  - path: "inference optimization"
+    description: "ML model inference optimization techniques (CPU, GPU, quantization)"
+  - path: "interview"
+    description: "Job interview preparation: questions, company-specific notes, practice"
+  - path: "quant"
+    description: "Quantitative finance: books, strategies, notes"
+  - path: "speech_therapy"
+    description: "Speech therapy exercises and progress"
+  - path: "uni"
+    description: "University coursework and deadlines"
+    children:
+      - path: "uni/oup"
+        description: "OUP course materials"
+      - path: "uni/philosophy"
+        description: "Philosophy course notes and seminar prep"
+      - path: "uni/tayak"
+        description: "TAYAK course: lectures and exam prep"
+  - path: "вкр"
+    description: "Bachelor thesis (ВКР) on voice conversion"
+    children:
+      - path: "вкр/Voice conversion"
+        description: "Main thesis work: architecture, experiments, ideas, data, requirements"
+        children:
+          - path: "вкр/Voice conversion/reference_papers"
+            description: "Academic papers and reading list for thesis"
+  - path: "inbox"
+    description: "Default fallback. Anything that doesn't clearly fit elsewhere."
+
+tags:
+  - toread
+  - audio_processing
+  - ai_agent
+  - experiment
+  - idea
+  - deadline
+  - reference
+  - voice_conversion
+  - ml
+  - university
+  - english
+  - interview_prep
+  - quick_note

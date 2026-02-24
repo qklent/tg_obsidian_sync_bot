@@ -1,0 +1,16 @@
+services:
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - vault_repo:/vault
+      - ./config:/app/config
+      - ssh_keys:/root/.ssh:ro
+    environment:
+      - TG_BOT_TOKEN
+      - OPENROUTER_API_KEY
+
+volumes:
+  vault_repo:
+  ssh_keys:
