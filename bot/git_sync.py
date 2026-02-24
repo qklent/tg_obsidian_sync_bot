@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 
 logger = logging.getLogger(__name__)
 
@@ -11,10 +12,13 @@ class GitSync:
         self._dirty = False
         self._lock = asyncio.Lock()
         self._note_count = 0
+        self._error_callbacks: list[Callable[[str], Awaitable[None]]] = []
 
-    def mark_dirty(self):
+    def mark_dirty(self, on_error: Callable[[str], Awaitable[None]] | None = None):
         self._dirty = True
         self._note_count += 1
+        if on_error is not None:
+            self._error_callbacks.append(on_error)
 
     async def sync_loop(self):
         """Run as background task. Periodically commit+push if dirty."""
@@ -25,11 +29,20 @@ class GitSync:
                     if not self._dirty:
                         continue
                     count = self._note_count
+                    callbacks = self._error_callbacks.copy()
                     self._dirty = False
                     self._note_count = 0
-                    await self._run_git(count)
+                    self._error_callbacks.clear()
+                    await self._run_git(count, callbacks)
 
-    async def _run_git(self, note_count: int):
+    async def _notify_error(self, message: str, callbacks: list[Callable[[str], Awaitable[None]]]):
+        for cb in callbacks:
+            try:
+                await cb(message)
+            except Exception:
+                logger.exception("Failed to send git error notification")
+
+    async def _run_git(self, note_count: int, error_callbacks: list[Callable[[str], Awaitable[None]]]):
         msg = f"telegram: add {note_count} note{'s' if note_count != 1 else ''}"
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -68,7 +81,9 @@ class GitSync:
             )
             stdout, stderr = await proc.communicate()
             if proc.returncode != 0:
-                logger.error("git commit failed: %s", stderr.decode())
+                err = stderr.decode().strip()
+                logger.error("git commit failed: %s", err)
+                await self._notify_error(f"Git sync failed (commit): `{err}`", error_callbacks)
                 return
 
             proc = await asyncio.create_subprocess_exec(
@@ -80,7 +95,9 @@ class GitSync:
             )
             stdout, stderr = await proc.communicate()
             if proc.returncode != 0:
-                logger.error("git push failed: %s", stderr.decode())
+                err = stderr.decode().strip()
+                logger.error("git push failed: %s", err)
+                await self._notify_error(f"Git sync failed (push): `{err}`", error_callbacks)
                 return
 
             logger.info("Git sync complete: %s", msg)

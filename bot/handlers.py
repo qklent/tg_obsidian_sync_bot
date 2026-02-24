@@ -163,7 +163,10 @@ async def _classify_and_save(
         tags=tags,
     )
 
-    git_sync.mark_dirty()
+    async def on_git_error(err: str):
+        await message.answer(f"Note saved, but git sync failed: {err}")
+
+    git_sync.mark_dirty(on_error=on_git_error)
 
     relative_path = note_path.name
     folder = result["folder"]
