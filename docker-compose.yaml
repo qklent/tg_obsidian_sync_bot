@@ -4,7 +4,7 @@ services:
     restart: unless-stopped
     env_file: .env
     volumes:
-      - vault_repo:/vault
+      - /vault:/vault
       - ./config:/app/config
       - ssh_keys:/root/.ssh:ro
     environment:
