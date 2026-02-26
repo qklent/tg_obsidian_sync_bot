@@ -6,11 +6,10 @@ services:
     volumes:
       - /notes:/vault
       - ./config:/app/config
-      - ssh_keys:/root/.ssh:ro
     environment:
       - TG_BOT_TOKEN
       - OPENROUTER_API_KEY
+      - GITHUB_TOKEN
 
 volumes:
   vault_repo:
-  ssh_keys:
