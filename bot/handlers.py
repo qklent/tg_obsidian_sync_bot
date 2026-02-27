@@ -107,7 +107,19 @@ def setup_handlers(
             await message.reply("Deduplication is not configured.")
             return
 
-        status_msg = await message.answer("Scanning vault for duplicates...")
+        threshold: float | None = None
+        args = message.text.split()[1:]
+        if args:
+            try:
+                threshold = float(args[0])
+                if not (0.0 < threshold <= 1.0):
+                    raise ValueError
+            except ValueError:
+                await message.reply("Invalid threshold. Use a number between 0 and 1, e.g. /deduplicate 0.9")
+                return
+
+        threshold_info = f" (threshold: {threshold})" if threshold is not None else ""
+        status_msg = await message.answer(f"Scanning vault for duplicates{threshold_info}...")
 
         last_edit = [0.0]
 
@@ -122,7 +134,7 @@ def setup_handlers(
                 pass
 
         try:
-            pairs = await deduplicator.scan(on_progress)
+            pairs = await deduplicator.scan(on_progress, threshold=threshold)
         except Exception:
             logger.exception("Dedup scan failed")
             await status_msg.edit_text("Dedup scan failed. Check logs.")

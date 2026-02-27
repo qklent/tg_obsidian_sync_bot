@@ -116,7 +116,7 @@ class Deduplicator:
 
         self._save_cache()
 
-    def _find_duplicates(self, notes: list[NoteInfo]) -> list[DuplicatePair]:
+    def _find_duplicates(self, notes: list[NoteInfo], threshold: float | None = None) -> list[DuplicatePair]:
         if len(notes) < 2:
             return []
 
@@ -149,7 +149,8 @@ class Deduplicator:
                 neighbor = indices[row_idx][col_idx]
                 sim = float(similarities[row_idx][col_idx])
 
-                if neighbor == row_idx or sim < self.similarity_threshold:
+                effective_threshold = threshold if threshold is not None else self.similarity_threshold
+                if neighbor == row_idx or sim < effective_threshold:
                     continue
 
                 note_j = notes[valid_indices[neighbor]]
@@ -170,12 +171,14 @@ class Deduplicator:
         return pairs
 
     async def scan(
-        self, progress_cb: Callable[[int, int], Awaitable[None]] | None = None
+        self,
+        progress_cb: Callable[[int, int], Awaitable[None]] | None = None,
+        threshold: float | None = None,
     ) -> list[DuplicatePair]:
         notes = self._collect_notes()
         logger.info("Collected %d notes for dedup scan", len(notes))
         await self._update_embeddings(notes, progress_cb)
-        return self._find_duplicates(notes)
+        return self._find_duplicates(notes, threshold=threshold)
 
     def delete_note(self, path: str):
         p = Path(path)
