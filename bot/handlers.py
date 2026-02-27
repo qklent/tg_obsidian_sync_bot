@@ -1,15 +1,24 @@
+import html as html_module
 import logging
 
 from aiogram import Bot, Router, F
-from aiogram.types import Message
+from aiogram.enums import ParseMode
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from bot.llm import LLMClassifier
 from bot.vault import VaultWriter
-from bot.git_sync import GitSync
+from bot.git_sync import GitSync, PendingMerge
 
 logger = logging.getLogger(__name__)
 
 router = Router()
+
+_MAX_CONFLICT_PREVIEW = 500  # chars shown per side before truncating
 
 
 def setup_handlers(
@@ -22,6 +31,65 @@ def setup_handlers(
 ):
     """Configure the router with all dependencies."""
     router.message.filter(F.from_user.id.in_(set(allowed_user_ids)))
+
+    # --- conflict resolution wiring ---
+
+    async def handle_conflict(pending: PendingMerge):
+        total = len(pending.blocks)
+        for idx, block in enumerate(pending.blocks, 1):
+            current_preview = block.current.strip()
+            incoming_preview = block.incoming.strip()
+
+            if len(current_preview) > _MAX_CONFLICT_PREVIEW:
+                current_preview = current_preview[:_MAX_CONFLICT_PREVIEW] + "…"
+            if len(incoming_preview) > _MAX_CONFLICT_PREVIEW:
+                incoming_preview = incoming_preview[:_MAX_CONFLICT_PREVIEW] + "…"
+
+            text = (
+                f"⚠️ <b>Merge conflict</b> in "
+                f"<code>{html_module.escape(block.file_path)}</code> ({idx}/{total})\n\n"
+                f"<b>Current (yours):</b>\n"
+                f"<pre>{html_module.escape(current_preview)}</pre>\n\n"
+                f"<b>Incoming (from remote):</b>\n"
+                f"<pre>{html_module.escape(incoming_preview)}</pre>"
+            )
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="✅ Keep Current",
+                        callback_data=f"mc:{block.id}:cur",
+                    ),
+                    InlineKeyboardButton(
+                        text="⬇️ Accept Incoming",
+                        callback_data=f"mc:{block.id}:inc",
+                    ),
+                ]]
+            )
+            for user_id in allowed_user_ids:
+                await bot.send_message(
+                    user_id,
+                    text,
+                    reply_markup=keyboard,
+                    parse_mode=ParseMode.HTML,
+                )
+
+    git_sync.set_conflict_handler(handle_conflict)
+
+    @router.callback_query(F.data.startswith("mc:"))
+    async def handle_conflict_resolution(callback: CallbackQuery):
+        _, block_id, choice = callback.data.split(":")
+        resolution = "current" if choice == "cur" else "incoming"
+
+        resolved = await git_sync.resolve_conflict_block(block_id, resolution)
+        if not resolved:
+            await callback.answer("Already resolved or expired.", show_alert=True)
+            return
+
+        label = "✅ Kept current" if choice == "cur" else "⬇️ Accepted incoming"
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.answer(label)
+
+    # --- message handlers ---
 
     @router.message(F.photo)
     async def handle_photo(message: Message):

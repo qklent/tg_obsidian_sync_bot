@@ -1,24 +1,88 @@
 import asyncio
 import logging
+import re
+import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+CONFLICT_RESOLUTION_TIMEOUT = 30 * 60  # 30 minutes
+
+
+@dataclass
+class ConflictBlock:
+    id: str
+    file_path: str
+    block_index: int
+    current: str   # HEAD (local) content
+    incoming: str  # remote content
+
+
+@dataclass
+class PendingMerge:
+    blocks: list[ConflictBlock]
+    _pending_ids: set[str] = field(init=False)
+    _resolutions: dict[str, str] = field(default_factory=dict, init=False)
+    _done_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+
+    def __post_init__(self):
+        self._pending_ids = {b.id for b in self.blocks}
+
+    def resolve(self, block_id: str, resolution: str) -> bool:
+        """Record a resolution ('current' or 'incoming'). Returns False if already resolved."""
+        if block_id not in self._pending_ids:
+            return False
+        self._resolutions[block_id] = resolution
+        self._pending_ids.discard(block_id)
+        if not self._pending_ids:
+            self._done_event.set()
+        return True
+
+    def get_resolution(self, block_id: str) -> str:
+        return self._resolutions.get(block_id, "current")
+
+    async def wait_for_resolution(self, timeout: float = CONFLICT_RESOLUTION_TIMEOUT) -> bool:
+        """Wait until all blocks are resolved. Returns False on timeout."""
+        try:
+            await asyncio.wait_for(self._done_event.wait(), timeout=timeout)
+            return True
+        except asyncio.TimeoutError:
+            return False
+
 
 class GitSync:
-    def __init__(self, repo_path: str, debounce_seconds: int = 30):
+    def __init__(
+        self,
+        repo_path: str,
+        debounce_seconds: int = 30,
+        pull_interval_seconds: int = 60,
+    ):
         self.repo_path = repo_path
         self.debounce_seconds = debounce_seconds
+        self.pull_interval_seconds = pull_interval_seconds
         self._dirty = False
         self._lock = asyncio.Lock()
         self._note_count = 0
         self._error_callbacks: list[Callable[[str], Awaitable[None]]] = []
+        self._on_conflict: Callable[[PendingMerge], Awaitable[None]] | None = None
+        self._current_merge: PendingMerge | None = None
+
+    def set_conflict_handler(self, handler: Callable[[PendingMerge], Awaitable[None]]):
+        self._on_conflict = handler
 
     def mark_dirty(self, on_error: Callable[[str], Awaitable[None]] | None = None):
         self._dirty = True
         self._note_count += 1
         if on_error is not None:
             self._error_callbacks.append(on_error)
+
+    async def resolve_conflict_block(self, block_id: str, resolution: str) -> bool:
+        """Called by the bot when the user picks a resolution for a conflict block."""
+        if self._current_merge is None:
+            return False
+        return self._current_merge.resolve(block_id, resolution)
 
     async def sync_loop(self):
         """Run as background task. Periodically commit+push if dirty."""
@@ -35,6 +99,163 @@ class GitSync:
                     self._error_callbacks.clear()
                     await self._run_git(count, callbacks)
 
+    async def pull_loop(self):
+        """Run as background task. Periodically pull from remote."""
+        while True:
+            await asyncio.sleep(self.pull_interval_seconds)
+            async with self._lock:
+                await self._run_pull()
+
+    async def _run_pull(self) -> bool:
+        """Run git pull. Returns True if successful (including after conflict resolution)."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "pull",
+                cwd=self.repo_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+
+            if proc.returncode == 0:
+                logger.info("Git pull: %s", stdout.decode().strip() or "already up to date")
+                return True
+
+            out = stdout.decode()
+            if "CONFLICT" in out:
+                logger.warning("Git pull produced conflicts, awaiting user resolution")
+                return await self._handle_conflicts()
+
+            logger.error("Git pull failed: %s", stderr.decode().strip())
+            return False
+
+        except Exception:
+            logger.exception("Git pull error")
+            return False
+
+    async def _handle_conflicts(self) -> bool:
+        """Parse conflict markers, notify the user via Telegram, wait for resolution, apply it."""
+        proc = await asyncio.create_subprocess_exec(
+            "git", "diff", "--name-only", "--diff-filter=U",
+            cwd=self.repo_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        conflicting_files = [f for f in stdout.decode().strip().splitlines() if f]
+
+        if not conflicting_files:
+            return await self._complete_merge()
+
+        blocks: list[ConflictBlock] = []
+        for file_path in conflicting_files:
+            full_path = Path(self.repo_path) / file_path
+            try:
+                content = full_path.read_text()
+                blocks.extend(self._parse_conflicts(content, file_path))
+            except Exception:
+                logger.exception("Failed to parse conflicts in %s", file_path)
+
+        if not blocks:
+            logger.error("Conflict files found but no parseable blocks; aborting merge")
+            await self._abort_merge()
+            return False
+
+        pending = PendingMerge(blocks=blocks)
+        self._current_merge = pending
+
+        if self._on_conflict:
+            await self._on_conflict(pending)
+
+        resolved = await pending.wait_for_resolution()
+        self._current_merge = None
+
+        if not resolved:
+            logger.warning("Conflict resolution timed out, aborting merge")
+            await self._abort_merge()
+            return False
+
+        await self._apply_resolutions(pending)
+        return await self._complete_merge()
+
+    def _parse_conflicts(self, content: str, file_path: str) -> list[ConflictBlock]:
+        pattern = re.compile(
+            r"<<<<<<< HEAD\n(.*?)=======\n(.*?)>>>>>>> [^\n]+",
+            re.DOTALL,
+        )
+        return [
+            ConflictBlock(
+                id=uuid.uuid4().hex[:12],
+                file_path=file_path,
+                block_index=i,
+                current=match.group(1),
+                incoming=match.group(2),
+            )
+            for i, match in enumerate(pattern.finditer(content))
+        ]
+
+    async def _apply_resolutions(self, pending: PendingMerge):
+        by_file: dict[str, list[ConflictBlock]] = {}
+        for block in pending.blocks:
+            by_file.setdefault(block.file_path, []).append(block)
+
+        pattern = re.compile(
+            r"<<<<<<< HEAD\n(.*?)=======\n(.*?)>>>>>>> [^\n]+\n?",
+            re.DOTALL,
+        )
+        for file_path, blocks in by_file.items():
+            full_path = Path(self.repo_path) / file_path
+            try:
+                content = full_path.read_text()
+                matches = list(pattern.finditer(content))
+
+                # Apply in reverse order so earlier match positions stay valid
+                for i, match in enumerate(reversed(matches)):
+                    idx = len(matches) - 1 - i
+                    block = blocks[idx]
+                    chosen = (
+                        block.current
+                        if pending.get_resolution(block.id) == "current"
+                        else block.incoming
+                    )
+                    content = content[: match.start()] + chosen + content[match.end() :]
+
+                full_path.write_text(content)
+
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "add", file_path,
+                    cwd=self.repo_path,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await proc.communicate()
+            except Exception:
+                logger.exception("Failed to apply resolution for %s", file_path)
+
+    async def _complete_merge(self) -> bool:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "commit", "--no-edit",
+            cwd=self.repo_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            err = stderr.decode().strip()
+            if "nothing to commit" not in err:
+                logger.error("Merge commit failed: %s", err)
+                return False
+        return True
+
+    async def _abort_merge(self):
+        proc = await asyncio.create_subprocess_exec(
+            "git", "merge", "--abort",
+            cwd=self.repo_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+
     async def _notify_error(self, message: str, callbacks: list[Callable[[str], Awaitable[None]]]):
         for cb in callbacks:
             try:
@@ -45,22 +266,22 @@ class GitSync:
     async def _run_git(self, note_count: int, error_callbacks: list[Callable[[str], Awaitable[None]]]):
         msg = f"telegram: add {note_count} note{'s' if note_count != 1 else ''}"
         try:
+            # Pull first so our push won't be rejected
+            pull_ok = await self._run_pull()
+            if not pull_ok:
+                await self._notify_error("Git pull failed, skipping push", error_callbacks)
+                return
+
             proc = await asyncio.create_subprocess_exec(
-                "git",
-                "add",
-                "-A",
+                "git", "add", "-A",
                 cwd=self.repo_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             await proc.communicate()
 
-            # Check if there's anything to commit
             proc = await asyncio.create_subprocess_exec(
-                "git",
-                "diff",
-                "--cached",
-                "--quiet",
+                "git", "diff", "--cached", "--quiet",
                 cwd=self.repo_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -71,10 +292,7 @@ class GitSync:
                 return
 
             proc = await asyncio.create_subprocess_exec(
-                "git",
-                "commit",
-                "-m",
-                msg,
+                "git", "commit", "-m", msg,
                 cwd=self.repo_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -87,8 +305,7 @@ class GitSync:
                 return
 
             proc = await asyncio.create_subprocess_exec(
-                "git",
-                "push",
+                "git", "push",
                 cwd=self.repo_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

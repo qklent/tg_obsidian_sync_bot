@@ -39,6 +39,7 @@ async def main():
     git_sync = GitSync(
         repo_path=settings["vault"]["repo_path"],
         debounce_seconds=settings["git"]["commit_debounce_seconds"],
+        pull_interval_seconds=settings["git"]["pull_interval_seconds"],
     )
 
     router = setup_handlers(
@@ -51,14 +52,16 @@ async def main():
     )
     dp.include_router(router)
 
-    # Start git sync background task
+    # Start git background tasks
     sync_task = asyncio.create_task(git_sync.sync_loop())
+    pull_task = asyncio.create_task(git_sync.pull_loop())
 
     logger.info("Bot starting...")
     try:
         await dp.start_polling(bot)
     finally:
         sync_task.cancel()
+        pull_task.cancel()
         await bot.session.close()
 
 
