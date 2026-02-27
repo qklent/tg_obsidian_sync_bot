@@ -1,8 +1,11 @@
 import html as html_module
 import logging
+import time
+import uuid
 
 from aiogram import Bot, Router, F
 from aiogram.enums import ParseMode
+from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -10,6 +13,7 @@ from aiogram.types import (
     Message,
 )
 
+from bot.dedup import Deduplicator, DuplicatePair
 from bot.llm import LLMClassifier
 from bot.vault import VaultWriter
 from bot.git_sync import GitSync, PendingMerge
@@ -19,6 +23,11 @@ logger = logging.getLogger(__name__)
 router = Router()
 
 _MAX_CONFLICT_PREVIEW = 500  # chars shown per side before truncating
+_MAX_DEDUP_PREVIEW = 300
+_SESSION_TIMEOUT = 1800  # 30 minutes
+
+# Active dedup sessions: {session_id: DedupSession}
+_dedup_sessions: dict[str, dict] = {}
 
 
 def setup_handlers(
@@ -28,6 +37,7 @@ def setup_handlers(
     git_sync: GitSync,
     vault_structure: dict,
     allowed_user_ids: list[int],
+    deduplicator: Deduplicator | None = None,
 ):
     """Configure the router with all dependencies."""
     router.message.filter(F.from_user.id.in_(set(allowed_user_ids)))
@@ -88,6 +98,137 @@ def setup_handlers(
         label = "✅ Kept current" if choice == "cur" else "⬇️ Accepted incoming"
         await callback.message.edit_reply_markup(reply_markup=None)
         await callback.answer(label)
+
+    # --- deduplicate command ---
+
+    @router.message(Command("deduplicate"))
+    async def handle_deduplicate(message: Message):
+        if deduplicator is None:
+            await message.reply("Deduplication is not configured.")
+            return
+
+        status_msg = await message.answer("Scanning vault for duplicates...")
+
+        last_edit = [0.0]
+
+        async def on_progress(done: int, total: int):
+            now = time.monotonic()
+            if now - last_edit[0] < 3 and done < total:
+                return
+            last_edit[0] = now
+            try:
+                await status_msg.edit_text(f"Embedding notes... ({done}/{total})")
+            except Exception:
+                pass
+
+        try:
+            pairs = await deduplicator.scan(on_progress)
+        except Exception:
+            logger.exception("Dedup scan failed")
+            await status_msg.edit_text("Dedup scan failed. Check logs.")
+            return
+
+        if not pairs:
+            await status_msg.edit_text("No duplicates found!")
+            return
+
+        session_id = uuid.uuid4().hex[:8]
+        _dedup_sessions[session_id] = {
+            "pairs": pairs,
+            "index": 0,
+            "deleted": 0,
+            "created_at": time.monotonic(),
+        }
+
+        await status_msg.edit_text(f"Found {len(pairs)} potential duplicate(s).")
+        await _send_dedup_pair(message, session_id, 0)
+
+    @router.callback_query(F.data.startswith("dd:"))
+    async def handle_dedup_action(callback: CallbackQuery):
+        parts = callback.data.split(":")
+        if len(parts) != 4:
+            await callback.answer("Invalid action", show_alert=True)
+            return
+
+        _, session_id, idx_str, action = parts
+        idx = int(idx_str)
+
+        session = _dedup_sessions.get(session_id)
+        if not session:
+            await callback.answer("Session expired.", show_alert=True)
+            return
+
+        if time.monotonic() - session["created_at"] > _SESSION_TIMEOUT:
+            del _dedup_sessions[session_id]
+            await callback.answer("Session expired (30 min timeout).", show_alert=True)
+            return
+
+        pair: DuplicatePair = session["pairs"][idx]
+
+        if action == "del_a":
+            deduplicator.delete_note(pair.path_a)
+            session["deleted"] += 1
+            git_sync.mark_dirty()
+            await callback.answer("Deleted first note.")
+        elif action == "del_b":
+            deduplicator.delete_note(pair.path_b)
+            session["deleted"] += 1
+            git_sync.mark_dirty()
+            await callback.answer("Deleted second note.")
+        elif action == "skip":
+            await callback.answer("Skipped.")
+
+        await callback.message.edit_reply_markup(reply_markup=None)
+
+        next_idx = idx + 1
+        if next_idx < len(session["pairs"]):
+            session["index"] = next_idx
+            await _send_dedup_pair(callback.message, session_id, next_idx)
+        else:
+            deleted = session["deleted"]
+            del _dedup_sessions[session_id]
+            await callback.message.answer(
+                f"Done! Reviewed {len(session['pairs'])} pair(s), deleted {deleted} note(s)."
+            )
+
+    async def _send_dedup_pair(target: Message, session_id: str, idx: int):
+        session = _dedup_sessions[session_id]
+        pair: DuplicatePair = session["pairs"][idx]
+        total = len(session["pairs"])
+
+        rel_a = pair.path_a.replace(str(deduplicator.vault_path) + "/", "")
+        rel_b = pair.path_b.replace(str(deduplicator.vault_path) + "/", "")
+
+        preview_a = html_module.escape(pair.preview_a[:_MAX_DEDUP_PREVIEW])
+        preview_b = html_module.escape(pair.preview_b[:_MAX_DEDUP_PREVIEW])
+
+        text = (
+            f"<b>Duplicate {idx + 1}/{total}</b> "
+            f"({pair.similarity:.0%} similar)\n\n"
+            f"<b>A:</b> <code>{html_module.escape(rel_a)}</code>\n"
+            f"<pre>{preview_a}</pre>\n\n"
+            f"<b>B:</b> <code>{html_module.escape(rel_b)}</code>\n"
+            f"<pre>{preview_b}</pre>"
+        )
+
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="🗑 Delete A",
+                    callback_data=f"dd:{session_id}:{idx}:del_a",
+                ),
+                InlineKeyboardButton(
+                    text="🗑 Delete B",
+                    callback_data=f"dd:{session_id}:{idx}:del_b",
+                ),
+                InlineKeyboardButton(
+                    text="⏭ Skip",
+                    callback_data=f"dd:{session_id}:{idx}:skip",
+                ),
+            ]]
+        )
+
+        await target.answer(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
     # --- message handlers ---
 

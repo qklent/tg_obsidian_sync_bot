@@ -13,3 +13,8 @@ vault:
 git:
   commit_debounce_seconds: 30
   pull_interval_seconds: 60
+
+dedup:
+  embedding_model: "openai/text-embedding-3-small"
+  similarity_threshold: 0.90
+  cache_path: ".tg_sync_cache/embeddings.json"
