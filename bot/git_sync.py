@@ -305,18 +305,52 @@ class GitSync:
                 logger.exception("Failed to send git error notification")
 
     async def push_now(self) -> tuple[bool, str]:
-        """Manually trigger a push of any committed but unpushed local commits.
+        """Manually trigger a full sync: stage → pull → commit (if needed) → push.
 
-        Pulls first to avoid rejection, then pushes. Does not stage or commit
-        anything new — use this to flush commits that stacked up after a
-        previous automatic push failure.
+        This handles both failure modes:
+        - Push previously failed: commits exist locally, just needs a push.
+        - Pull previously failed: uncommitted files sit on disk; this stages
+          and commits them before pushing.
 
         Returns (success, message).
         """
         async with self._lock:
+            # Stage everything that's pending on disk
+            proc = await asyncio.create_subprocess_exec(
+                "git", "add", "-A",
+                cwd=self.repo_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+
+            # Pull so the push won't be rejected
             pull_ok = await self._run_pull()
             if not pull_ok:
                 return False, "Git pull failed — cannot push."
+
+            # Commit anything that was staged (either pre-existing or from add above)
+            proc = await asyncio.create_subprocess_exec(
+                "git", "diff", "--cached", "--quiet",
+                cwd=self.repo_path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+            has_staged = proc.returncode != 0
+
+            if has_staged:
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "commit", "-m", "telegram: manual push",
+                    cwd=self.repo_path,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await proc.communicate()
+                if proc.returncode != 0:
+                    err = stderr.decode().strip()
+                    logger.error("manual push commit failed: %s", err)
+                    return False, f"Commit failed: `{err}`"
 
             loop = asyncio.get_running_loop()
             try:
