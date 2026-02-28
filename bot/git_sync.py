@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import os
 import re
+import subprocess
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -106,11 +108,50 @@ class GitSync:
             async with self._lock:
                 await self._run_pull()
 
+    def _get_auth_remote_url(self) -> str:
+        """Return the origin remote URL with GITHUB_TOKEN embedded for dulwich."""
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=self.repo_path, capture_output=True, text=True, check=True,
+        )
+        remote_url = result.stdout.strip()
+        github_token = os.environ.get("GITHUB_TOKEN", "")
+        if github_token and "https://" in remote_url:
+            remote_url = remote_url.replace("https://", f"https://x-access-token:{github_token}@")
+        return remote_url
+
+    def _dulwich_fetch(self) -> None:
+        """Fetch from remote using dulwich (pure Python).
+
+        dulwich implements the git smart-HTTP protocol directly in Python so it
+        never needs to fork() a git-remote-https subprocess – which is exactly
+        what causes the 'cannot fork() for remote-https' error inside Docker
+        containers that have a tight PID limit.
+        """
+        from dulwich import porcelain
+        porcelain.fetch(self.repo_path, remote_location=self._get_auth_remote_url())
+
+    def _dulwich_push(self) -> None:
+        """Push to remote using dulwich (pure Python, same fork-free reason as fetch)."""
+        from dulwich import porcelain
+        from dulwich.repo import Repo
+        remote_url = self._get_auth_remote_url()
+        with Repo(self.repo_path) as repo:
+            head_ref = repo.refs.get_symrefs().get(b"HEAD", b"refs/heads/main")
+        porcelain.push(self.repo_path, remote_location=remote_url, refspecs=[head_ref])
+
     async def _run_pull(self) -> bool:
-        """Run git pull. Returns True if successful (including after conflict resolution)."""
+        """Fetch via dulwich then merge locally. Returns True on success."""
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, self._dulwich_fetch)
+        except Exception as e:
+            logger.error("Git pull failed (fetch): %s", e)
+            return False
+
         try:
             proc = await asyncio.create_subprocess_exec(
-                "git", "pull",
+                "git", "merge", "FETCH_HEAD",
                 cwd=self.repo_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -126,7 +167,7 @@ class GitSync:
                 logger.warning("Git pull produced conflicts, awaiting user resolution")
                 return await self._handle_conflicts()
 
-            logger.error("Git pull failed: %s", stderr.decode().strip())
+            logger.error("Git pull failed (merge): %s", stderr.decode().strip())
             return False
 
         except Exception:
@@ -304,15 +345,11 @@ class GitSync:
                 await self._notify_error(f"Git sync failed (commit): `{err}`", error_callbacks)
                 return
 
-            proc = await asyncio.create_subprocess_exec(
-                "git", "push",
-                cwd=self.repo_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
-            if proc.returncode != 0:
-                err = stderr.decode().strip()
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(None, self._dulwich_push)
+            except Exception as e:
+                err = str(e)
                 logger.error("git push failed: %s", err)
                 await self._notify_error(f"Git sync failed (push): `{err}`", error_callbacks)
                 return
