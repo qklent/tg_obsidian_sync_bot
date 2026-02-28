@@ -25,6 +25,11 @@ folders:
         description: "Philosophy course notes and seminar prep"
       - path: "uni/tayak"
         description: "TAYAK course: lectures and exam prep"
+  - path: "tg_sync_bot"
+    description: "Notes and ideas about the Telegram-to-Obsidian sync bot project"
+    children:
+      - path: "tg_sync_bot/todo"
+        description: "Ideas and planned improvements for the tg_sync_bot project"
   - path: "вкр"
     description: "Bachelor thesis (ВКР) on voice conversion"
     children:
