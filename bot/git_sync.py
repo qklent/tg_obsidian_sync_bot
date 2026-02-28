@@ -304,6 +304,31 @@ class GitSync:
             except Exception:
                 logger.exception("Failed to send git error notification")
 
+    async def push_now(self) -> tuple[bool, str]:
+        """Manually trigger a push of any committed but unpushed local commits.
+
+        Pulls first to avoid rejection, then pushes. Does not stage or commit
+        anything new — use this to flush commits that stacked up after a
+        previous automatic push failure.
+
+        Returns (success, message).
+        """
+        async with self._lock:
+            pull_ok = await self._run_pull()
+            if not pull_ok:
+                return False, "Git pull failed — cannot push."
+
+            loop = asyncio.get_running_loop()
+            try:
+                await loop.run_in_executor(None, self._dulwich_push)
+            except Exception as e:
+                err = str(e)
+                logger.error("manual push failed: %s", err)
+                return False, f"Push failed: `{err}`"
+
+            logger.info("Manual push complete")
+            return True, "Pushed successfully."
+
     async def _run_git(self, note_count: int, error_callbacks: list[Callable[[str], Awaitable[None]]]):
         msg = f"telegram: add {note_count} note{'s' if note_count != 1 else ''}"
         try:

@@ -242,6 +242,15 @@ def setup_handlers(
 
         await target.answer(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
+    # --- push command ---
+
+    @router.message(Command("push"))
+    async def handle_push(message: Message):
+        status_msg = await message.answer("Pushing to remote...")
+        ok, result_msg = await git_sync.push_now()
+        icon = "✅" if ok else "❌"
+        await status_msg.edit_text(f"{icon} {result_msg}")
+
     # --- message handlers ---
 
     @router.message(F.photo)
