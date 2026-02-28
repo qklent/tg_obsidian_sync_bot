@@ -13,6 +13,37 @@ logger = logging.getLogger(__name__)
 CONFLICT_RESOLUTION_TIMEOUT = 30 * 60  # 30 minutes
 
 
+def _format_push_error(exc: Exception) -> str:
+    """Convert a dulwich push exception to a human-readable string.
+
+    dulwich raises push failures with opaque args — e.g. a bare tuple of two
+    SHA1 bytes when the remote rejects a non-fast-forward update.  This helper
+    makes those errors legible in logs and Telegram notifications.
+    """
+    args = exc.args
+    if not args:
+        return repr(exc)
+    arg = args[0]
+    # Two-element tuple of bytes: (remote_sha, local_sha) — non-fast-forward
+    if isinstance(arg, tuple) and len(arg) == 2 and all(isinstance(x, bytes) for x in arg):
+        remote = arg[0][:7].decode("ascii", errors="replace")
+        local = arg[1][:7].decode("ascii", errors="replace")
+        return f"non-fast-forward rejected (remote={remote}, local={local})"
+    # Dict of ref → status (UpdateRefsError style)
+    if isinstance(arg, dict):
+        parts = []
+        for ref, status in arg.items():
+            ref_s = ref.decode("ascii", errors="replace") if isinstance(ref, bytes) else str(ref)
+            if isinstance(status, (tuple, list)):
+                last = status[-1]
+                status_s = last.decode("ascii", errors="replace") if isinstance(last, bytes) else str(last)
+            else:
+                status_s = status.decode("ascii", errors="replace") if isinstance(status, bytes) else str(status)
+            parts.append(f"{ref_s}: {status_s}")
+        return "; ".join(parts) if parts else str(exc)
+    return str(exc)
+
+
 @dataclass
 class ConflictBlock:
     id: str
@@ -140,6 +171,19 @@ class GitSync:
             head_ref = repo.refs.get_symrefs().get(b"HEAD", b"refs/heads/main")
         porcelain.push(self.repo_path, remote_location=remote_url, refspecs=[head_ref])
 
+    async def _get_upstream_ref(self) -> str:
+        """Return the upstream tracking ref (e.g. 'origin/main'), falling back to FETCH_HEAD."""
+        proc = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}",
+            cwd=self.repo_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode == 0:
+            return stdout.decode().strip()
+        return "FETCH_HEAD"
+
     async def _run_pull(self) -> bool:
         """Fetch via dulwich then merge locally. Returns True on success."""
         loop = asyncio.get_running_loop()
@@ -149,9 +193,13 @@ class GitSync:
             logger.error("Git pull failed (fetch): %s", e)
             return False
 
+        # Use the remote tracking ref (e.g. origin/main) that dulwich updates,
+        # rather than FETCH_HEAD which dulwich may not write reliably.
+        merge_target = await self._get_upstream_ref()
+
         try:
             proc = await asyncio.create_subprocess_exec(
-                "git", "merge", "FETCH_HEAD",
+                "git", "merge", merge_target,
                 cwd=self.repo_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -159,7 +207,7 @@ class GitSync:
             stdout, stderr = await proc.communicate()
 
             if proc.returncode == 0:
-                logger.info("Git pull: %s", stdout.decode().strip() or "already up to date")
+                logger.info("Git pull: %s", stdout.decode().strip() or "Already up to date.")
                 return True
 
             out = stdout.decode()
@@ -353,15 +401,22 @@ class GitSync:
                     return False, f"Commit failed: `{err}`"
 
             loop = asyncio.get_running_loop()
-            try:
-                await loop.run_in_executor(None, self._dulwich_push)
-            except Exception as e:
-                err = str(e)
-                logger.error("manual push failed: %s", err)
-                return False, f"Push failed: `{err}`"
-
-            logger.info("Manual push complete")
-            return True, "Pushed successfully."
+            for attempt in range(2):
+                try:
+                    await loop.run_in_executor(None, self._dulwich_push)
+                    logger.info("Manual push complete")
+                    return True, "Pushed successfully."
+                except Exception as e:
+                    err = _format_push_error(e)
+                    if attempt == 0:
+                        logger.warning("manual push failed, pulling and retrying: %s", err)
+                        pull_ok = await self._run_pull()
+                        if not pull_ok:
+                            return False, f"Push failed and pull retry failed: `{err}`"
+                    else:
+                        logger.error("manual push failed: %s", err)
+                        return False, f"Push failed: `{err}`"
+            return False, "Push failed after retry."  # unreachable, satisfies type checker
 
     async def _run_git(self, note_count: int, error_callbacks: list[Callable[[str], Awaitable[None]]]):
         msg = f"telegram: add {note_count} note{'s' if note_count != 1 else ''}"
@@ -405,15 +460,27 @@ class GitSync:
                 return
 
             loop = asyncio.get_running_loop()
-            try:
-                await loop.run_in_executor(None, self._dulwich_push)
-            except Exception as e:
-                err = str(e)
-                logger.error("git push failed: %s", err)
-                await self._notify_error(f"Git sync failed (push): `{err}`", error_callbacks)
-                return
-
-            logger.info("Git sync complete: %s", msg)
+            for attempt in range(2):
+                try:
+                    await loop.run_in_executor(None, self._dulwich_push)
+                    logger.info("Git sync complete: %s", msg)
+                    return
+                except Exception as e:
+                    err = _format_push_error(e)
+                    if attempt == 0:
+                        logger.warning("git push failed, pulling and retrying: %s", err)
+                        if not await self._run_pull():
+                            logger.error("pull before push-retry also failed")
+                            await self._notify_error(
+                                f"Git sync failed (push + retry pull failed): `{err}`",
+                                error_callbacks,
+                            )
+                            return
+                    else:
+                        logger.error("git push failed: %s", err)
+                        await self._notify_error(
+                            f"Git sync failed (push): `{err}`", error_callbacks
+                        )
 
         except Exception:
             logger.exception("Git sync error")
