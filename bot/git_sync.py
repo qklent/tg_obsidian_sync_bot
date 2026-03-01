@@ -132,13 +132,38 @@ class GitSync:
         porcelain.fetch(self.repo_path, remote_location=self._get_auth_remote_url())
 
     def _dulwich_push(self) -> None:
-        """Push to remote using dulwich (pure Python, same fork-free reason as fetch)."""
+        """Push to remote using dulwich (pure Python, fork-free for Docker).
+
+        force=True skips dulwich's client-side ancestry check, which raises an
+        opaque Exception((remote_sha, local_sha)) when dulwich's object store is
+        incomplete (because we merged via subprocess git, not dulwich). GitHub
+        still enforces non-fast-forward protection server-side, so this is safe.
+        """
         from dulwich import porcelain
         from dulwich.repo import Repo
         remote_url = self._get_auth_remote_url()
         with Repo(self.repo_path) as repo:
             head_ref = repo.refs.get_symrefs().get(b"HEAD", b"refs/heads/main")
-        porcelain.push(self.repo_path, remote_location=remote_url, refspecs=[head_ref])
+        porcelain.push(self.repo_path, remote_location=remote_url, refspecs=[head_ref], force=True)
+
+    async def _get_upstream_ref(self) -> str:
+        """Return the remote tracking ref (e.g. 'origin/master'), falling back to FETCH_HEAD.
+
+        dulwich's porcelain.fetch() updates refs/remotes/origin/<branch> reliably
+        but does NOT always write FETCH_HEAD. Using the tracking ref avoids merging
+        with a stale FETCH_HEAD that makes git report 'Already up to date.' when
+        the local branch is actually behind the remote.
+        """
+        proc = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}",
+            cwd=self.repo_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await proc.communicate()
+        if proc.returncode == 0:
+            return stdout.decode().strip()
+        return "FETCH_HEAD"
 
     async def _run_pull(self) -> bool:
         """Fetch via dulwich then merge locally. Returns True on success."""
@@ -149,9 +174,11 @@ class GitSync:
             logger.error("Git pull failed (fetch): %s", e)
             return False
 
+        merge_target = await self._get_upstream_ref()
+
         try:
             proc = await asyncio.create_subprocess_exec(
-                "git", "merge", "FETCH_HEAD",
+                "git", "merge", merge_target,
                 cwd=self.repo_path,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -353,15 +380,21 @@ class GitSync:
                     return False, f"Commit failed: `{err}`"
 
             loop = asyncio.get_running_loop()
-            try:
-                await loop.run_in_executor(None, self._dulwich_push)
-            except Exception as e:
-                err = str(e)
-                logger.error("manual push failed: %s", err)
-                return False, f"Push failed: `{err}`"
-
-            logger.info("Manual push complete")
-            return True, "Pushed successfully."
+            for attempt in range(2):
+                try:
+                    await loop.run_in_executor(None, self._dulwich_push)
+                    logger.info("Manual push complete")
+                    return True, "Pushed successfully."
+                except Exception as e:
+                    err = str(e)
+                    if attempt == 0:
+                        logger.warning("manual push failed, pulling and retrying: %s", err)
+                        if not await self._run_pull():
+                            return False, f"Push failed and pull-retry also failed: `{err}`"
+                    else:
+                        logger.error("manual push failed: %s", err)
+                        return False, f"Push failed: `{err}`"
+            return False, "Push failed after retry."  # unreachable
 
     async def _run_git(self, note_count: int, error_callbacks: list[Callable[[str], Awaitable[None]]]):
         msg = f"telegram: add {note_count} note{'s' if note_count != 1 else ''}"
@@ -405,15 +438,26 @@ class GitSync:
                 return
 
             loop = asyncio.get_running_loop()
-            try:
-                await loop.run_in_executor(None, self._dulwich_push)
-            except Exception as e:
-                err = str(e)
-                logger.error("git push failed: %s", err)
-                await self._notify_error(f"Git sync failed (push): `{err}`", error_callbacks)
-                return
-
-            logger.info("Git sync complete: %s", msg)
+            for attempt in range(2):
+                try:
+                    await loop.run_in_executor(None, self._dulwich_push)
+                    logger.info("Git sync complete: %s", msg)
+                    return
+                except Exception as e:
+                    err = str(e)
+                    if attempt == 0:
+                        logger.warning("git push failed, pulling and retrying: %s", err)
+                        if not await self._run_pull():
+                            await self._notify_error(
+                                f"Git sync failed (push + pull-retry failed): `{err}`",
+                                error_callbacks,
+                            )
+                            return
+                    else:
+                        logger.error("git push failed: %s", err)
+                        await self._notify_error(
+                            f"Git sync failed (push): `{err}`", error_callbacks
+                        )
 
         except Exception:
             logger.exception("Git sync error")

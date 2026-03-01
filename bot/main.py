@@ -2,6 +2,7 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher
+from aiogram.types import BotCommand
 from dotenv import load_dotenv
 
 from openai import AsyncOpenAI
@@ -71,6 +72,10 @@ async def main():
     # Start git background tasks
     sync_task = asyncio.create_task(git_sync.sync_loop())
     pull_task = asyncio.create_task(git_sync.pull_loop())
+
+    await bot.set_my_commands([
+        BotCommand(command="deduplicate", description="Scan vault for duplicates (optional: threshold, e.g. 0.9)"),
+    ])
 
     logger.info("Bot starting...")
     try:
