@@ -1,7 +1,9 @@
 import html as html_module
 import logging
+import random
 import time
 import uuid
+from pathlib import Path
 
 from aiogram import Bot, Router, F
 from aiogram.enums import ParseMode
@@ -24,10 +26,14 @@ router = Router()
 
 _MAX_CONFLICT_PREVIEW = 500  # chars shown per side before truncating
 _MAX_DEDUP_PREVIEW = 300
+_MAX_NOTE_PREVIEW = 600
 _SESSION_TIMEOUT = 1800  # 30 minutes
 
 # Active dedup sessions: {session_id: DedupSession}
 _dedup_sessions: dict[str, dict] = {}
+
+# Active inbox review sessions: {session_id: {note_path, folders, created_at}}
+_inbox_sessions: dict[str, dict] = {}
 
 
 def setup_handlers(
@@ -242,6 +248,141 @@ def setup_handlers(
 
         await target.answer(text, reply_markup=keyboard, parse_mode=ParseMode.HTML)
 
+    # --- inbox review command ---
+
+    async def _start_review(target: Message):
+        notes = vault_writer.list_inbox_notes()
+        if not notes:
+            await target.answer("Inbox is empty! Nothing to review.")
+            return
+
+        note = random.choice(notes)
+        session_id = uuid.uuid4().hex[:8]
+        folders = _get_all_folders(vault_structure)
+
+        _inbox_sessions[session_id] = {
+            "note_path": str(note),
+            "folders": folders,
+            "created_at": time.monotonic(),
+        }
+        await _send_review_note(target, session_id, note)
+
+    async def _send_review_note(target: Message, session_id: str, note_path):
+        note_path = Path(note_path)
+        session = _inbox_sessions[session_id]
+        folders = session["folders"]
+
+        content = note_path.read_text(encoding="utf-8")
+        preview = _parse_note_preview(content, _MAX_NOTE_PREVIEW)
+
+        # Folder buttons, 2 per row
+        folder_buttons = [
+            InlineKeyboardButton(
+                text=f"📂 {folder}",
+                callback_data=f"rv:{session_id}:move:{i}",
+            )
+            for i, folder in enumerate(folders)
+        ]
+        rows = [folder_buttons[i:i + 2] for i in range(0, len(folder_buttons), 2)]
+        rows.append([
+            InlineKeyboardButton(text="✅ Keep", callback_data=f"rv:{session_id}:keep"),
+            InlineKeyboardButton(text="⏭ Skip", callback_data=f"rv:{session_id}:skip"),
+            InlineKeyboardButton(text="🗑 Delete", callback_data=f"rv:{session_id}:delete"),
+        ])
+
+        remaining = len(vault_writer.list_inbox_notes())
+        text = (
+            f"<b>📥 Inbox</b> · <code>{html_module.escape(note_path.name)}</code>"
+            f" ({remaining} left)\n\n"
+            f"<pre>{html_module.escape(preview)}</pre>"
+        )
+        await target.answer(
+            text,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+            parse_mode=ParseMode.HTML,
+        )
+
+    @router.message(Command("review"))
+    async def handle_review(message: Message):
+        await _start_review(message)
+
+    @router.callback_query(F.data == "rv_next")
+    async def handle_review_next(callback: CallbackQuery):
+        await callback.answer()
+        await _start_review(callback.message)
+
+    @router.callback_query(F.data.startswith("rv:"))
+    async def handle_review_action(callback: CallbackQuery):
+        parts = callback.data.split(":", 3)
+        session_id = parts[1]
+        action = parts[2]
+
+        session = _inbox_sessions.get(session_id)
+        if not session:
+            await callback.answer("Session expired.", show_alert=True)
+            return
+        if time.monotonic() - session["created_at"] > _SESSION_TIMEOUT:
+            del _inbox_sessions[session_id]
+            await callback.answer("Session expired (30 min timeout).", show_alert=True)
+            return
+
+        note_path = Path(session["note_path"])
+
+        if action == "move":
+            folder_idx = int(parts[3])
+            dest_folder = session["folders"][folder_idx]
+            vault_writer.move_note(note_path, dest_folder)
+            git_sync.mark_dirty()
+            del _inbox_sessions[session_id]
+            await callback.message.edit_reply_markup(reply_markup=None)
+            await callback.answer(f"Moved to {dest_folder}!")
+            remaining = len(vault_writer.list_inbox_notes())
+            next_btn = [[InlineKeyboardButton(text="Next note ➡️", callback_data="rv_next")]]
+            await callback.message.answer(
+                f"✅ Moved to <code>{html_module.escape(dest_folder)}</code>."
+                + (f" {remaining} note(s) left in inbox." if remaining else " Inbox is now empty!"),
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=next_btn) if remaining else None,
+            )
+
+        elif action == "keep":
+            del _inbox_sessions[session_id]
+            await callback.message.edit_reply_markup(reply_markup=None)
+            await callback.answer("Kept in inbox.")
+            remaining = len(vault_writer.list_inbox_notes())
+            if remaining > 1:
+                next_btn = [[InlineKeyboardButton(text="Next note ➡️", callback_data="rv_next")]]
+                await callback.message.answer(
+                    f"{remaining} note(s) left in inbox.",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=next_btn),
+                )
+
+        elif action == "skip":
+            del _inbox_sessions[session_id]
+            await callback.message.edit_reply_markup(reply_markup=None)
+            await callback.answer("Skipped.")
+            remaining = len(vault_writer.list_inbox_notes())
+            if remaining > 0:
+                next_btn = [[InlineKeyboardButton(text="Next note ➡️", callback_data="rv_next")]]
+                await callback.message.answer(
+                    f"{remaining} note(s) left in inbox.",
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=next_btn),
+                )
+
+        elif action == "delete":
+            note_path.unlink(missing_ok=True)
+            git_sync.mark_dirty()
+            del _inbox_sessions[session_id]
+            await callback.message.edit_reply_markup(reply_markup=None)
+            await callback.answer("Deleted.")
+            remaining = len(vault_writer.list_inbox_notes())
+            next_btn = [[InlineKeyboardButton(text="Next note ➡️", callback_data="rv_next")]]
+            await callback.message.answer(
+                "🗑 Note deleted."
+                + (f" {remaining} note(s) left in inbox." if remaining else " Inbox is now empty!"),
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=next_btn) if remaining else None,
+            )
+
     # --- push command ---
 
     @router.message(Command("push"))
@@ -338,6 +479,43 @@ def setup_handlers(
         )
 
     return router
+
+
+def _get_all_folders(vault_structure: dict, exclude: str = "inbox") -> list[str]:
+    """Flatten all folder paths from vault_structure, excluding the given folder."""
+    result = []
+
+    def traverse(folders: list[dict]):
+        for f in folders:
+            if f["path"] != exclude:
+                result.append(f["path"])
+            if "children" in f:
+                traverse(f["children"])
+
+    traverse(vault_structure["folders"])
+    return result
+
+
+def _parse_note_preview(content: str, max_chars: int = 600) -> str:
+    """Extract a readable preview from a note, skipping YAML frontmatter."""
+    lines = content.splitlines()
+    body_lines = []
+    in_frontmatter = False
+
+    for i, line in enumerate(lines):
+        if i == 0 and line.strip() == "---":
+            in_frontmatter = True
+            continue
+        if in_frontmatter:
+            if line.strip() == "---":
+                in_frontmatter = False
+            continue
+        body_lines.append(line)
+
+    body = "\n".join(body_lines).strip()
+    if len(body) > max_chars:
+        body = body[:max_chars] + "…"
+    return body
 
 
 def _extract_forward_source(message: Message) -> str:

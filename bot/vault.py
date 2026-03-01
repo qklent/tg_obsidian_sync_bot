@@ -53,6 +53,31 @@ class VaultWriter:
         logger.info("Wrote note: %s", file_path.relative_to(self.repo_path))
         return file_path
 
+    def list_inbox_notes(self, inbox_folder: str = "inbox") -> list[Path]:
+        """Return all .md files in the inbox folder."""
+        inbox_path = self.repo_path / inbox_folder
+        if not inbox_path.exists():
+            return []
+        return sorted(inbox_path.glob("*.md"))
+
+    def move_note(self, src_path: Path, dest_folder: str) -> Path:
+        """Move a note to a different vault folder. Returns the new path."""
+        dest_dir = self.repo_path / dest_folder
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        dest_path = dest_dir / src_path.name
+        if dest_path.exists():
+            stem = dest_path.stem
+            suffix = dest_path.suffix
+            counter = 1
+            while dest_path.exists():
+                dest_path = dest_dir / f"{stem}-{counter}{suffix}"
+                counter += 1
+
+        src_path.rename(dest_path)
+        logger.info("Moved note: %s → %s", src_path, dest_path)
+        return dest_path
+
     def save_attachment(self, file_bytes: bytes, filename: str) -> str:
         """Save an attachment file and return the vault-relative path."""
         attach_dir = self.repo_path / self.attachments_dir
