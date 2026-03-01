@@ -19,6 +19,7 @@ from bot.dedup import Deduplicator, DuplicatePair
 from bot.llm import LLMClassifier
 from bot.vault import VaultWriter
 from bot.git_sync import GitSync, PendingMerge
+from bot.web_fetch import augment_text_with_urls
 
 logger = logging.getLogger(__name__)
 
@@ -474,8 +475,11 @@ def setup_handlers(
             source = _extract_forward_source(message)
             text = f"[Forwarded from {source}]\n\n{text}"
 
+        # Fetch content from URLs to improve LLM classification
+        text_for_llm = await augment_text_with_urls(text)
+
         await _classify_and_save(
-            message, text, classifier, vault_writer, git_sync, vault_structure
+            message, text_for_llm, classifier, vault_writer, git_sync, vault_structure
         )
 
     return router

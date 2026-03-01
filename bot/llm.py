@@ -45,6 +45,7 @@ Rules:
 - Pick 1-4 tags that are most relevant
 - content: preserve the original meaning, fix formatting, add markdown structure if appropriate
 - If the message is a forwarded post or article, add a "source" line at the top of content
+- If the message contains fetched link content, use it to create a meaningful title and summary. Include a brief summary of the linked content in the note.
 - Respond ONLY with the JSON object, no other text
 
 USER MESSAGE:
