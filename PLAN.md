@@ -55,7 +55,7 @@ pipeline with an Obsidian Kanban task management system.
    ├── agents.md               # When to delegate to subagents
    └── performance.md          # Model selection, context management
    
-   tasks/
+   notes/
    ├── board.md          (Kanban board file)
    ├── _template.md      (task template)
    └── done/             (completed tasks archive)
@@ -66,7 +66,7 @@ pipeline with an Obsidian Kanban task management system.
    NOTE: Keep CLAUDE.md as the high-level project overview. Use .claude/rules/ 
    for specific, modular rules that scale better as the project grows.
 
-3. Create tasks/_template.md with this format:
+3. Create notes/_template.md with this format:
    ---
    status: planning
    priority: medium
@@ -96,7 +96,7 @@ pipeline with an Obsidian Kanban task management system.
    ## PR
    {{pr_url}}
 
-4. Create tasks/board.md as an Obsidian Kanban board:
+4. Create notes/board.md as an Obsidian Kanban board:
    ---
    kanban-plugin: basic
    ---
@@ -123,10 +123,10 @@ pipeline with an Obsidian Kanban task management system.
    - Key modules and their responsibilities
    - Important interfaces/types
    - Dependency graph between modules
-   Store output as tasks/_codemap.md (auto-regenerated, not manually edited).
+   Store output as notes/_codemap.md (auto-regenerated, not manually edited).
 
 6. Add to .gitignore:
-   - tasks/done/ contents are tracked (for history)
+   - notes/done/ contents are tracked (for history)
    - .claude/settings.local.json is NOT committed
    - .claude/agents/ IS committed
    - logs/ is NOT committed
@@ -165,7 +165,7 @@ hooks configuration:
         ]
       },
       {
-        "matcher": "tool == \"Write\" && tool_input.file_path matches \"\\.md$\" && !(tool_input.file_path matches \"(README|CLAUDE|board|_template|tasks/)\")",
+        "matcher": "tool == \"Write\" && tool_input.file_path matches \"\\.md$\" && !(tool_input.file_path matches \"(README|CLAUDE|board|_template|notes/)\")",
         "hooks": [
           {
             "type": "command",
@@ -246,7 +246,7 @@ Reference our CLAUDE.md conventions in each agent's system prompt.
    - Role: Technical product manager that refines raw task notes
    - Behavior:
      * Read the existing codebase to understand what's already built
-     * Read tasks/_codemap.md first to orient without burning context
+     * Read notes/_codemap.md first to orient without burning context
      * Analyze the raw task notes for ambiguities
      * Ask the user 3-7 specific clarifying questions:
        - What exactly should happen on success vs error?
@@ -268,7 +268,7 @@ Reference our CLAUDE.md conventions in each agent's system prompt.
    - Tools: Read, Grep, Glob            ← NO Write/Edit (plan-only agent)
    - Role: Technical architect that creates implementation plans
    - Behavior:
-     * Read tasks/_codemap.md first for codebase orientation
+     * Read notes/_codemap.md first for codebase orientation
      * Read the refined spec from the task file
      * Analyze existing codebase architecture deeply
      * Create ordered implementation plan with:
@@ -286,7 +286,7 @@ Reference our CLAUDE.md conventions in each agent's system prompt.
    - Role: Senior developer implementing features
    - Behavior:
      * Read the implementation plan from the task file
-     * Read tasks/_codemap.md for quick codebase orientation
+     * Read notes/_codemap.md for quick codebase orientation
      * Follow the plan step by step
      * Check existing code patterns before writing anything new
      * Reuse existing utilities and helpers
@@ -352,7 +352,7 @@ Reference our CLAUDE.md conventions in each agent's system prompt.
      * After coder agent completes work, review what changed
      * Update README.md if public API or usage changed
      * Update architecture.md if structural changes were made
-     * Regenerate tasks/_codemap.md with current project state
+     * Regenerate notes/_codemap.md with current project state
      * Keep docs in sync with code — never let them drift
      * Only touch documentation files, never source code
 ```
@@ -392,7 +392,7 @@ Create the following custom slash commands in .claude/commands/:
    Execute this pipeline in order:
    
    Step 0 — CODEMAP: Use the doc-updater agent to regenerate 
-   tasks/_codemap.md so all subsequent agents have fresh orientation.
+   notes/_codemap.md so all subsequent agents have fresh orientation.
    
    Step 1 — PLAN: Use the planner agent to create a detailed implementation 
    plan. Write it to the task file's Implementation Plan section.
@@ -427,8 +427,8 @@ Create the following custom slash commands in .claude/commands/:
    ---
    description: Process all todo tasks sequentially (or in parallel with worktrees)
    ---
-   List all .md files in the tasks/ directory (excluding board.md, 
-   _template.md, _codemap.md, and files in tasks/done/).
+   List all .md files in the notes/ directory (excluding board.md, 
+   _template.md, _codemap.md, and files in notes/done/).
    
    For each file with status: todo in its YAML frontmatter:
    - Run the implement-task pipeline on it
@@ -445,7 +445,7 @@ Create the following custom slash commands in .claude/commands/:
    ---
    description: Retry all failed/stuck in-progress tasks
    ---
-   List all .md files in tasks/ with status: in-progress.
+   List all .md files in notes/ with status: in-progress.
    
    For each:
    - Check retry_count vs max_retries in YAML frontmatter
@@ -464,7 +464,7 @@ Create the following custom slash commands in .claude/commands/:
    ---
    description: Regenerate the project codemap for agent orientation
    ---
-   Use the doc-updater agent to regenerate tasks/_codemap.md.
+   Use the doc-updater agent to regenerate notes/_codemap.md.
    This provides a compact overview of the project structure, 
    key modules, interfaces, and dependencies — allowing agents 
    to orient quickly without reading the entire codebase.
@@ -477,13 +477,13 @@ Create the following automation scripts:
 
 1. scripts/sync-board.sh:                     ← NEW SCRIPT (critical fix)
    #!/bin/bash
-   # Regenerates tasks/board.md from YAML frontmatter of all task files.
+   # Regenerates notes/board.md from YAML frontmatter of all task files.
    # This keeps the Obsidian Kanban board in sync with actual task states.
    # Run after any status change.
    
    set -euo pipefail
-   TASKS_DIR="${TASKS_DIR:-./tasks}"
-   BOARD_FILE="$TASKS_DIR/board.md"
+   NOTES_DIR="${NOTES_DIR:-./notes}"
+   BOARD_FILE="$NOTES_DIR/board.md"
    
    # Collect tasks by status
    declare -A LANES
@@ -494,7 +494,7 @@ Create the following automation scripts:
    LANES[done]=""
    LANES[failed]=""
    
-   for task_file in "$TASKS_DIR"/*.md; do
+   for task_file in "$NOTES_DIR"/*.md; do
        [[ "$task_file" == *"board.md" ]] && continue
        [[ "$task_file" == *"_template.md" ]] && continue
        [[ "$task_file" == *"_codemap.md" ]] && continue
@@ -511,7 +511,7 @@ Create the following automation scripts:
    done
    
    # Also check done/ directory
-   for task_file in "$TASKS_DIR"/done/*.md; do
+   for task_file in "$NOTES_DIR"/done/*.md; do
        [ -f "$task_file" ] || continue
        title=$(grep -m1 "^# " "$task_file" | sed 's/^# //' || basename "$task_file" .md)
        filename=$(basename "$task_file")
@@ -554,7 +554,7 @@ EOF
    #!/bin/bash
    set -euo pipefail
    
-   TASKS_DIR="${TASKS_DIR:-./tasks}"
+   NOTES_DIR="${NOTES_DIR:-./notes}"
    PROJECT_DIR="${PROJECT_DIR:-.}"
    TG_BOT_TOKEN="${TG_BOT_TOKEN:-}"
    TG_CHAT_ID="${TG_CHAT_ID:-}"
@@ -592,7 +592,7 @@ EOF
    processed=0
    failed=0
    
-   for task_file in "$TASKS_DIR"/*.md; do
+   for task_file in "$NOTES_DIR"/*.md; do
        [[ "$task_file" == *"board.md" ]] && continue
        [[ "$task_file" == *"_template.md" ]] && continue
        [[ "$task_file" == *"_codemap.md" ]] && continue
@@ -618,7 +618,7 @@ EOF
            Read the task file at $task_file.
            
            Execute this pipeline:
-           0. Use doc-updater agent to regenerate tasks/_codemap.md
+           0. Use doc-updater agent to regenerate notes/_codemap.md
            1. Use planner agent to create implementation plan — write it to the task file
            2. Run /compact to free context before coding
            3. Use coder agent to implement the plan step by step
@@ -673,7 +673,7 @@ $PR_URL"
    
    set -euo pipefail
    
-   TASKS_DIR="${TASKS_DIR:-./tasks}"
+   NOTES_DIR="${NOTES_DIR:-./notes}"
    MAX_PARALLEL="${MAX_PARALLEL:-3}"
    WORKTREE_BASE="../pipeline-worktrees"
    
@@ -681,7 +681,7 @@ $PR_URL"
    
    # Collect todo tasks
    todo_tasks=()
-   for task_file in "$TASKS_DIR"/*.md; do
+   for task_file in "$NOTES_DIR"/*.md; do
        [[ "$task_file" == *"board.md" ]] && continue
        [[ "$task_file" == *"_template.md" ]] && continue
        [[ "$task_file" == *"_codemap.md" ]] && continue
@@ -709,7 +709,7 @@ $PR_URL"
        # Run pipeline in worktree (background)
        (
            cd "$worktree_dir"
-           TASKS_DIR="$TASKS_DIR" PROJECT_DIR="$worktree_dir" \
+           NOTES_DIR="$NOTES_DIR" PROJECT_DIR="$worktree_dir" \
                ../$(dirname "$0")/run-task-pipeline.sh
            
            # Cleanup worktree when done
@@ -729,17 +729,17 @@ $PR_URL"
 
 4. scripts/watch-tasks.sh:
    #!/bin/bash
-   # Auto-triggers pipeline when new .md files appear in tasks/
+   # Auto-triggers pipeline when new .md files appear in notes/
    
-   TASKS_DIR="${TASKS_DIR:-./tasks}"
+   NOTES_DIR="${NOTES_DIR:-./notes}"
    
-   echo "👁 Watching $TASKS_DIR for new tasks..."
+   echo "👁 Watching $NOTES_DIR for new tasks..."
    
    # Detect OS and use appropriate watcher
    if command -v fswatch &> /dev/null; then
        # macOS
        fswatch -o -e "board.md" -e "_template.md" -e "_codemap.md" -e "done/" \
-           --event Created "$TASKS_DIR" | while read; do
+           --event Created "$NOTES_DIR" | while read; do
            echo "New task detected, waiting 5s for file to settle..."
            sleep 5
            ./scripts/run-task-pipeline.sh
@@ -748,7 +748,7 @@ $PR_URL"
        # Linux
        while true; do
            inotifywait -q -e create -e moved_to \
-               --exclude "(board|_template|_codemap|done)" "$TASKS_DIR"
+               --exclude "(board|_template|_codemap|done)" "$NOTES_DIR"
            echo "New task detected, waiting 5s..."
            sleep 5
            ./scripts/run-task-pipeline.sh
@@ -766,14 +766,14 @@ $PR_URL"
 5. scripts/clarify-task.sh:
    #!/bin/bash
    # Interactive script for the Planning stage
-   # Usage: ./scripts/clarify-task.sh tasks/my-task.md
+   # Usage: ./scripts/clarify-task.sh notes/my-task.md
    
    TASK_FILE="$1"
    
    if [ -z "$TASK_FILE" ]; then
        echo "Usage: $0 <task-file>"
        echo "Available planning tasks:"
-       grep -l "^status: planning" tasks/*.md 2>/dev/null || echo "  (none)"
+       grep -l "^status: planning" notes/*.md 2>/dev/null || echo "  (none)"
        exit 1
    fi
    
@@ -791,7 +791,7 @@ Also create a Makefile for convenience:
    .PHONY: clarify implement implement-parallel watch pipeline status retry
    
    clarify:
-   	@echo "Tasks in planning:" && grep -l "^status: planning" tasks/*.md 2>/dev/null
+   	@echo "Tasks in planning:" && grep -l "^status: planning" notes/*.md 2>/dev/null
    	@read -p "Task file: " f && ./scripts/clarify-task.sh $$f
    
    implement:
@@ -813,12 +813,12 @@ Also create a Makefile for convenience:
    	claude "/project:update-codemap"
    
    status:
-   	@echo "📋 Planning:" && grep -l "^status: planning" tasks/*.md 2>/dev/null || echo "  none"
-   	@echo "📥 Todo:" && grep -l "^status: todo" tasks/*.md 2>/dev/null || echo "  none"
-   	@echo "⚙️ In Progress:" && grep -l "^status: in-progress" tasks/*.md 2>/dev/null || echo "  none"
-   	@echo "👀 Review:" && grep -l "^status: review" tasks/*.md 2>/dev/null || echo "  none"
-   	@echo "❌ Failed:" && grep -l "^status: failed" tasks/*.md 2>/dev/null || echo "  none"
-   	@echo "✅ Done:" && grep -l "^status: done" tasks/done/*.md 2>/dev/null || echo "  none"
+   	@echo "📋 Planning:" && grep -l "^status: planning" notes/*.md 2>/dev/null || echo "  none"
+   	@echo "📥 Todo:" && grep -l "^status: todo" notes/*.md 2>/dev/null || echo "  none"
+   	@echo "⚙️ In Progress:" && grep -l "^status: in-progress" notes/*.md 2>/dev/null || echo "  none"
+   	@echo "👀 Review:" && grep -l "^status: review" notes/*.md 2>/dev/null || echo "  none"
+   	@echo "❌ Failed:" && grep -l "^status: failed" notes/*.md 2>/dev/null || echo "  none"
+   	@echo "✅ Done:" && grep -l "^status: done" notes/done/*.md 2>/dev/null || echo "  none"
 ```
 
 ### Phase 6: CI/CD Integration
@@ -932,13 +932,13 @@ Create GitHub Actions workflows:
 4. Update .gitignore to add:
    .claude/settings.local.json
    logs/
-   tasks/_codemap.md              # Auto-generated, not manually edited
+   notes/_codemap.md              # Auto-generated, not manually edited
    # Keep these tracked:
    # .claude/agents/
    # .claude/commands/
    # .claude/rules/
    # .claude/skills/
-   # tasks/ (including done/)
+   # notes/ (including done/)
 
 5. Add a section to the project README.md:
 
@@ -953,11 +953,11 @@ Create GitHub Actions workflows:
    ### Quick Start
    
    **Add a new task:**
-   Copy tasks/_template.md → tasks/my-feature.md, fill in raw notes.
+   Copy notes/_template.md → notes/my-feature.md, fill in raw notes.
    
    **Refine a task (interactive):**
    make clarify
-   # or: ./scripts/clarify-task.sh tasks/my-feature.md
+   # or: ./scripts/clarify-task.sh notes/my-feature.md
    
    **Run pipeline on all todo tasks:**
    make implement
@@ -1017,11 +1017,11 @@ Create GitHub Actions workflows:
 | `.claude/commands/*.md` | Custom slash commands | ✅ |
 | `.claude/skills/*.md` | Workflow skills (codemap updater, etc.) | ✅ |
 | `.claude/settings.json` | Shared project settings + hooks | ✅ |
-| `tasks/_template.md` | Task template with YAML frontmatter | ✅ |
-| `tasks/_codemap.md` | Auto-generated project codemap | ❌ |
-| `tasks/board.md` | Obsidian Kanban board (auto-synced) | ✅ |
-| `tasks/*.md` | Active task files | ✅ |
-| `tasks/done/*.md` | Completed task archive | ✅ |
+| `notes/_template.md` | Task template with YAML frontmatter | ✅ |
+| `notes/_codemap.md` | Auto-generated project codemap | ❌ |
+| `notes/board.md` | Obsidian Kanban board (auto-synced) | ✅ |
+| `notes/*.md` | Active task files | ✅ |
+| `notes/done/*.md` | Completed task archive | ✅ |
 | `scripts/*.sh` | Automation scripts | ✅ |
 | `.github/workflows/` | CI/CD with Claude review | ✅ |
 | `Makefile` | Convenience commands | ✅ |
@@ -1057,10 +1057,10 @@ Create GitHub Actions workflows:
 ## Daily Usage
 
 ```bash
-# From Telegram: send task to tg_obsidian_sync_bot → lands in tasks/ as planning
+# From Telegram: send task to tg_obsidian_sync_bot → lands in notes/ as planning
 
 # Refine it interactively
-./scripts/clarify-task.sh tasks/new-feature.md
+./scripts/clarify-task.sh notes/new-feature.md
 
 # Let the agents cook (sequential)
 make implement
