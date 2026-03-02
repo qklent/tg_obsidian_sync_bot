@@ -75,6 +75,7 @@ async def main():
 
     await bot.set_my_commands([
         BotCommand(command="deduplicate", description="Scan vault for duplicates (optional: threshold, e.g. 0.9)"),
+        BotCommand(command="review", description="Review and file notes from your inbox"),
     ])
 
     logger.info("Bot starting...")
