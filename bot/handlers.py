@@ -573,6 +573,9 @@ async def _classify_and_save(
         title=result["title"],
         content=content,
         tags=tags,
+        status=result.get("status"),
+        priority=result.get("priority"),
+        clarification_needed=result.get("clarification_needed"),
     )
 
     async def on_git_error(err: str):
