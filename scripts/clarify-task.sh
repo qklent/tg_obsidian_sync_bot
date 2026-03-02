@@ -7,7 +7,7 @@ TASK_FILE="$1"
 if [ -z "$TASK_FILE" ]; then
     echo "Usage: $0 <task-file>"
     echo "Available planning tasks:"
-    grep -l "^status: planning" /home/qklent/programming/Notes/Notes/*.md 2>/dev/null || echo "  (none)"
+    grep -l "^status: planning" /home/qklent/programming/Notes/Notes/tg_sync_bot/*.md 2>/dev/null || echo "  (none)"
     exit 1
 fi
 

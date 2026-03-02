@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-NOTES_DIR="${NOTES_DIR:-/home/qklent/programming/Notes/Notes}"
+NOTES_DIR="${NOTES_DIR:-/home/qklent/programming/Notes/Notes/tg_sync_bot}"
 PROJECT_DIR="${PROJECT_DIR:-.}"
 TG_BOT_TOKEN="${TG_BOT_TOKEN:-}"
 TG_CHAT_ID="${TG_CHAT_ID:-}"

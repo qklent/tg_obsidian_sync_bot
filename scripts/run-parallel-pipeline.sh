@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-NOTES_DIR="${NOTES_DIR:-/home/qklent/programming/Notes/Notes}"
+NOTES_DIR="${NOTES_DIR:-/home/qklent/programming/Notes/Notes/tg_sync_bot}"
 MAX_PARALLEL="${MAX_PARALLEL:-3}"
 WORKTREE_BASE="../pipeline-worktrees"
 

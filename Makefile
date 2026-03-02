@@ -1,4 +1,4 @@
-NOTES_DIR := /home/qklent/programming/Notes/Notes
+NOTES_DIR := /home/qklent/programming/Notes/Notes/tg_sync_bot
 
 .PHONY: clarify implement implement-parallel watch pipeline status retry sync-board update-codemap
 

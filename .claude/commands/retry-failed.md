@@ -1,7 +1,7 @@
 ---
 description: Retry all failed/stuck in-progress tasks
 ---
-List all .md files in /home/qklent/programming/Notes/Notes/ with status: in-progress.
+List all .md files in /home/qklent/programming/Notes/Notes/tg_sync_bot/ with status: in-progress.
 
 For each:
 - Check retry_count vs max_retries in YAML frontmatter

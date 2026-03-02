@@ -1,7 +1,7 @@
 #!/bin/bash
 # Auto-triggers pipeline when new .md files appear in notes/
 
-NOTES_DIR="${NOTES_DIR:-/home/qklent/programming/Notes/Notes}"
+NOTES_DIR="${NOTES_DIR:-/home/qklent/programming/Notes/Notes/tg_sync_bot}"
 
 echo "Watching $NOTES_DIR for new tasks..."
 

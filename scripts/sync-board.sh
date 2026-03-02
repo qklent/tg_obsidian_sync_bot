@@ -4,7 +4,7 @@
 # Run after any status change.
 
 set -euo pipefail
-NOTES_DIR="${NOTES_DIR:-/home/qklent/programming/Notes/Notes}"
+NOTES_DIR="${NOTES_DIR:-/home/qklent/programming/Notes/Notes/tg_sync_bot}"
 BOARD_FILE="$NOTES_DIR/board.md"
 
 # Collect tasks by status

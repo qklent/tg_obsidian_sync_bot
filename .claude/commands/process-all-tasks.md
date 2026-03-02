@@ -1,7 +1,7 @@
 ---
 description: Process all todo tasks sequentially
 ---
-List all .md files in /home/qklent/programming/Notes/Notes/ (excluding board.md,
+List all .md files in /home/qklent/programming/Notes/Notes/tg_sync_bot/ (excluding board.md,
 _template.md, _codemap.md, and files in done/).
 
 For each file with status: todo in its YAML frontmatter:
