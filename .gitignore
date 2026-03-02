@@ -1,2 +1,13 @@
 .env
 .tg_sync_cache/
+.claude/settings.local.json
+logs/
+notes/_codemap.md
+
+# Keep these tracked:
+# .claude/agents/
+# .claude/commands/
+# .claude/rules/
+# .claude/skills/
+# .claude/settings.json
+# notes/ (including done/)

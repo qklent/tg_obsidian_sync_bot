@@ -1,0 +1,76 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git *)",
+      "Bash(gh *)",
+      "Bash(npm *)",
+      "Bash(npx *)",
+      "Bash(cat *)",
+      "Bash(ls *)",
+      "Bash(grep *)",
+      "Bash(find *)",
+      "Bash(sed *)"
+    ],
+    "deny": [
+      "Bash(rm -rf /)",
+      "Bash(curl * | bash)",
+      "Bash(sudo *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if echo \"$TOOL_INPUT\" | grep -qE '(npm|pnpm|yarn|cargo|pytest|make)' && [ -z \"$TMUX\" ]; then echo '[Hook] WARNING: Consider running inside tmux for session persistence on long commands' >&2; fi"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if echo \"$TOOL_INPUT\" | grep -q 'git push'; then echo '[Hook] Pre-push check: verify tests pass and no console.log statements remain' >&2; grep -rn 'console\\.log' --include='*.ts' --include='*.tsx' --include='*.js' --include='*.jsx' src/ 2>/dev/null && echo 'Found console.log statements — remove before pushing' >&2 || true; fi"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if echo \"$TOOL_INPUT\" | grep -qE '\\.(ts|tsx|js|jsx)$'; then npx prettier --write \"$TOOL_INPUT_FILE_PATH\" 2>/dev/null || true; fi"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if echo \"$TOOL_INPUT\" | grep -qE '\\.(py)$' && [ -f \"$TOOL_INPUT_FILE_PATH\" ]; then if grep -n 'console\\.log\\|print(' \"$TOOL_INPUT_FILE_PATH\" 2>/dev/null | grep -v 'logging\\|logger'; then echo '[Hook] Possible debug statement detected in modified file' >&2; fi; fi"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '[Hook] Session ending — auditing for debug statements...' >&2; git diff --name-only 2>/dev/null | xargs grep -l 'console\\.log' 2>/dev/null && echo 'Debug statements found in changed files' >&2 || echo 'No debug statements found' >&2"
+          }
+        ]
+      }
+    ]
+  },
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  }
+}
