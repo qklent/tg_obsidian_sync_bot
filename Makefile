@@ -16,13 +16,13 @@ watch:
 	./scripts/watch-tasks.sh
 
 retry:
-	claude "/project:retry-failed"
+	claude "/retry-failed"
 
 sync-board:
 	./scripts/sync-board.sh
 
 update-codemap:
-	claude "/project:update-codemap"
+	claude "/update-codemap"
 
 status:
 	@echo "Planning:" && grep -l "^status: planning" $(NOTES_DIR)/*.md 2>/dev/null || echo "  none"

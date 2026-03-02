@@ -21,15 +21,16 @@ Telegram bot that classifies incoming messages using an LLM and saves them as Ma
 bot/
   main.py          # Entry point: loads config, wires components, starts polling
   config.py        # YAML config loader with env var resolution
-  handlers.py      # Telegram message/command handlers
+  handlers.py      # Telegram message/command handlers (message, /push, /deduplicate, /review)
   llm.py           # LLM classification via OpenRouter
   git_sync.py      # Git add/commit/push/pull, debounce, conflict resolution
   vault.py         # Markdown file writing and attachment management
   dedup.py         # Duplicate detection via embeddings + FAISS
+  web_fetch.py     # URL extraction + Jina Reader API fetching to enrich LLM context
   note_template.md.j2  # Jinja2 template for notes
 config/
   settings.yaml         # Bot token, LLM model, git debounce, dedup config
-  vault_structure.yaml  # Folder tree + tag definitions (fed to LLM)
+  vault_structure.yaml  # Folder tree + tag definitions (fed to LLM); includes ai_agents, general_ml
 ```
 
 ## Running Locally
@@ -56,6 +57,7 @@ docker-compose logs -f bot
 
 - `/push` — manually trigger git commit + push (bypasses debounce)
 - `/deduplicate [threshold]` — scan vault for duplicate notes (default threshold: 0.90)
+- `/review` — interactive inbox review: move/keep/skip/delete notes with inline folder picker buttons
 
 ## Architecture Notes
 
@@ -65,6 +67,9 @@ docker-compose logs -f bot
 - **Background loops:** `sync_loop()` commits dirty state every 30s; `pull_loop()` pulls from remote every 60s
 - **LLM fallback:** if classification fails, notes go to `inbox/` with generic tags
 - **Conflict resolution:** interactive Telegram inline buttons for merge conflicts (30-min timeout)
+- **URL enrichment:** `web_fetch.py` extracts URLs from messages and fetches content via Jina Reader (`https://r.jina.ai/{url}`) before passing to LLM
+- **Kanban branching:** `vault.py` uses a separate vault-side template (`tg_sync_bot/_template.md`) with extra fields (`status`, `priority`, `clarification_needed`) when the target folder starts with `tg_sync_bot`
+- **Secret redaction:** two layers — `_RedactSecretsFilter` (Python logging) in `main.py` and `_RedactingStream` (dulwich raw output) in `git_sync.py`
 
 ## Code Conventions
 
