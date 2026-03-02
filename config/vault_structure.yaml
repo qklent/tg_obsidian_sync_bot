@@ -35,6 +35,10 @@ folders:
         children:
           - path: "вкр/Voice conversion/reference_papers"
             description: "Academic papers and reading list for thesis"
+  - path: "ai_agents"
+    description: "AI agents: interesting links, ideas, papers, and notes on agent architectures and frameworks"
+  - path: "general_ml"
+    description: "General machine learning: interesting links, ideas, papers, and notes not specific to other ML topics"
   - path: "inbox"
     description: "Default fallback. Anything that doesn't clearly fit elsewhere."
 
