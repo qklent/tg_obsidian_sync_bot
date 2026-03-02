@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand
@@ -21,8 +22,33 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+class _RedactSecretsFilter(logging.Filter):
+    """Replace secret values with *** in every log record before emission."""
+
+    def __init__(self, secrets: list[str]) -> None:
+        super().__init__()
+        self._secrets = [s for s in secrets if s]
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not self._secrets:
+            return True
+        record.msg = self._redact(str(record.msg))
+        if record.args:
+            record.args = tuple(self._redact(str(a)) for a in record.args)
+        return True
+
+    def _redact(self, text: str) -> str:
+        for secret in self._secrets:
+            text = text.replace(secret, "***")
+        return text
+
+
 async def main():
     load_dotenv()
+
+    github_token = os.environ.get("GITHUB_TOKEN", "")
+    if github_token:
+        logging.getLogger().addFilter(_RedactSecretsFilter([github_token]))
 
     settings = load_settings()
     vault_structure = load_vault_structure()
