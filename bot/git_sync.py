@@ -10,6 +10,27 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+
+class _RedactingStream:
+    """Byte-stream shim passed to dulwich that strips secrets before logging.
+
+    dulwich writes push/fetch progress to outstream/errstream (bytes streams)
+    rather than through Python's logging, so a logging.Filter cannot redact
+    those messages.  This wrapper intercepts every write, redacts known secret
+    values, and forwards the sanitised text to the module logger.
+    """
+
+    def __init__(self, secrets: list[str]) -> None:
+        self._secrets = [s.encode() for s in secrets if s]
+
+    def write(self, data: bytes) -> int:
+        for secret in self._secrets:
+            data = data.replace(secret, b"***")
+        text = data.decode(errors="replace").strip()
+        if text:
+            logger.debug("%s", text)
+        return len(data)
+
 CONFLICT_RESOLUTION_TIMEOUT = 30 * 60  # 30 minutes
 
 
@@ -120,6 +141,9 @@ class GitSync:
             remote_url = remote_url.replace("https://", f"https://x-access-token:{github_token}@")
         return remote_url
 
+    def _make_stream(self) -> "_RedactingStream":
+        return _RedactingStream([os.environ.get("GITHUB_TOKEN", "")])
+
     def _dulwich_fetch(self) -> None:
         """Fetch from remote using dulwich (pure Python).
 
@@ -129,7 +153,9 @@ class GitSync:
         containers that have a tight PID limit.
         """
         from dulwich import porcelain
-        porcelain.fetch(self.repo_path, remote_location=self._get_auth_remote_url())
+        stream = self._make_stream()
+        porcelain.fetch(self.repo_path, remote_location=self._get_auth_remote_url(),
+                        outstream=stream, errstream=stream)
 
     def _dulwich_push(self) -> None:
         """Push to remote using dulwich (pure Python, fork-free for Docker).
@@ -142,9 +168,11 @@ class GitSync:
         from dulwich import porcelain
         from dulwich.repo import Repo
         remote_url = self._get_auth_remote_url()
+        stream = self._make_stream()
         with Repo(self.repo_path) as repo:
             head_ref = repo.refs.get_symrefs().get(b"HEAD", b"refs/heads/main")
-        porcelain.push(self.repo_path, remote_location=remote_url, refspecs=[head_ref], force=True)
+        porcelain.push(self.repo_path, remote_location=remote_url, refspecs=[head_ref], force=True,
+                       outstream=stream, errstream=stream)
 
     async def _get_upstream_ref(self) -> str:
         """Return the remote tracking ref (e.g. 'origin/master'), falling back to FETCH_HEAD.
