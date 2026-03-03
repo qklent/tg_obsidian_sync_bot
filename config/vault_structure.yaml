@@ -43,9 +43,9 @@ folders:
     description: "Default fallback. Anything that doesn't clearly fit elsewhere."
 
 tags:
+  # -- retained originals --
   - toread
   - audio_processing
-  - ai_agent
   - experiment
   - idea
   - deadline
@@ -54,5 +54,32 @@ tags:
   - ml
   - university
   - english
-  - interview_prep
   - quick_note
+  # -- renamed / split --
+  - ai_agents
+  - interview_tech
+  - interview_behave
+  # -- ML subtags --
+  - nlp
+  - transformers
+  - rl
+  - cnn
+  - diffusion
+  - llm
+  - fine_tuning
+  - dataset
+  - embeddings
+  - inference_opt
+  - asr
+  - tts
+  # -- intent / content-type --
+  - tutorial
+  - summary
+  - link
+  - paper
+  - question
+  - todo
+  - resource
+  - project
+  - bug
+  - how_to
