@@ -1,10 +1,10 @@
 import asyncio
-import logging
 import os
 
 from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand
 from dotenv import load_dotenv
+from loguru import logger
 
 from openai import AsyncOpenAI
 
@@ -14,41 +14,14 @@ from bot.llm import LLMClassifier
 from bot.vault import VaultWriter
 from bot.git_sync import GitSync
 from bot.handlers import setup_handlers
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-)
-logger = logging.getLogger(__name__)
-
-
-class _RedactSecretsFilter(logging.Filter):
-    """Replace secret values with *** in every log record before emission."""
-
-    def __init__(self, secrets: list[str]) -> None:
-        super().__init__()
-        self._secrets = [s for s in secrets if s]
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        if not self._secrets:
-            return True
-        record.msg = self._redact(str(record.msg))
-        if record.args:
-            record.args = tuple(self._redact(str(a)) for a in record.args)
-        return True
-
-    def _redact(self, text: str) -> str:
-        for secret in self._secrets:
-            text = text.replace(secret, "***")
-        return text
+from bot.logging_config import setup_logging
 
 
 async def main():
     load_dotenv()
 
     github_token = os.environ.get("GITHUB_TOKEN", "")
-    if github_token:
-        logging.getLogger().addFilter(_RedactSecretsFilter([github_token]))
+    setup_logging(secrets=[github_token] if github_token else None)
 
     settings = load_settings()
     vault_structure = load_vault_structure()
@@ -91,6 +64,7 @@ async def main():
         git_sync=git_sync,
         vault_structure=vault_structure,
         allowed_user_ids=settings["telegram"]["allowed_user_ids"],
+        project_dir=settings.get("pipeline", {}).get("project_dir", "."),
         deduplicator=deduplicator,
     )
     dp.include_router(router)
@@ -100,8 +74,10 @@ async def main():
     pull_task = asyncio.create_task(git_sync.pull_loop())
 
     await bot.set_my_commands([
+        BotCommand(command="clarify", description="Clarify a planning task (optional: filename)"),
         BotCommand(command="deduplicate", description="Scan vault for duplicates (optional: threshold, e.g. 0.9)"),
         BotCommand(command="review", description="Review and file notes from your inbox"),
+        BotCommand(command="push", description="Manually trigger git push"),
     ])
 
     logger.info("Bot starting...")

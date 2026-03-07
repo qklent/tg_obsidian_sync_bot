@@ -1,14 +1,14 @@
 import asyncio
-import logging
 import os
 import re
 import subprocess
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 
 class _RedactingStream:
@@ -196,10 +196,12 @@ class GitSync:
     async def _run_pull(self) -> bool:
         """Fetch via dulwich then merge locally. Returns True on success."""
         loop = asyncio.get_running_loop()
+        t0 = time.monotonic()
         try:
             await loop.run_in_executor(None, self._dulwich_fetch)
         except Exception as e:
-            logger.error("Git pull failed (fetch): %s", e)
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            logger.bind(duration_ms=duration_ms, success=False, error=str(e)).error("git_pull_fetch_failed")
             return False
 
         merge_target = await self._get_upstream_ref()
@@ -212,21 +214,31 @@ class GitSync:
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, stderr = await proc.communicate()
+            duration_ms = int((time.monotonic() - t0) * 1000)
 
             if proc.returncode == 0:
-                logger.info("Git pull: %s", stdout.decode().strip() or "already up to date")
+                logger.bind(
+                    duration_ms=duration_ms,
+                    success=True,
+                    detail=stdout.decode().strip() or "already up to date",
+                ).info("git_pull_complete")
                 return True
 
             out = stdout.decode()
             if "CONFLICT" in out:
-                logger.warning("Git pull produced conflicts, awaiting user resolution")
+                logger.bind(duration_ms=duration_ms, success=False).warning("git_pull_conflicts")
                 return await self._handle_conflicts()
 
-            logger.error("Git pull failed (merge): %s", stderr.decode().strip())
+            logger.bind(
+                duration_ms=duration_ms,
+                success=False,
+                error=stderr.decode().strip(),
+            ).error("git_pull_merge_failed")
             return False
 
         except Exception:
-            logger.exception("Git pull error")
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            logger.bind(duration_ms=duration_ms, success=False).exception("git_pull_error")
             return False
 
     async def _handle_conflicts(self) -> bool:
@@ -250,10 +262,10 @@ class GitSync:
                 content = full_path.read_text()
                 blocks.extend(self._parse_conflicts(content, file_path))
             except Exception:
-                logger.exception("Failed to parse conflicts in %s", file_path)
+                logger.bind(file=file_path).exception("conflict_parse_failed")
 
         if not blocks:
-            logger.error("Conflict files found but no parseable blocks; aborting merge")
+            logger.error("conflict_no_parseable_blocks")
             await self._abort_merge()
             return False
 
@@ -267,7 +279,7 @@ class GitSync:
         self._current_merge = None
 
         if not resolved:
-            logger.warning("Conflict resolution timed out, aborting merge")
+            logger.warning("conflict_resolution_timeout")
             await self._abort_merge()
             return False
 
@@ -326,7 +338,7 @@ class GitSync:
                 )
                 await proc.communicate()
             except Exception:
-                logger.exception("Failed to apply resolution for %s", file_path)
+                logger.bind(file=file_path).exception("conflict_apply_resolution_failed")
 
     async def _complete_merge(self) -> bool:
         proc = await asyncio.create_subprocess_exec(
@@ -339,7 +351,7 @@ class GitSync:
         if proc.returncode != 0:
             err = stderr.decode().strip()
             if "nothing to commit" not in err:
-                logger.error("Merge commit failed: %s", err)
+                logger.bind(error=err).error("merge_commit_failed")
                 return False
         return True
 
@@ -357,7 +369,7 @@ class GitSync:
             try:
                 await cb(message)
             except Exception:
-                logger.exception("Failed to send git error notification")
+                logger.exception("git_error_notification_failed")
 
     async def push_now(self) -> tuple[bool, str]:
         """Manually trigger a full sync: stage → pull → commit (if needed) → push.
@@ -404,28 +416,29 @@ class GitSync:
                 _, stderr = await proc.communicate()
                 if proc.returncode != 0:
                     err = stderr.decode().strip()
-                    logger.error("manual push commit failed: %s", err)
+                    logger.bind(error=err).error("manual_push_commit_failed")
                     return False, f"Commit failed: `{err}`"
 
             loop = asyncio.get_running_loop()
             for attempt in range(2):
                 try:
                     await loop.run_in_executor(None, self._dulwich_push)
-                    logger.info("Manual push complete")
+                    logger.info("manual_push_complete")
                     return True, "Pushed successfully."
                 except Exception as e:
                     err = str(e)
                     if attempt == 0:
-                        logger.warning("manual push failed, pulling and retrying: %s", err)
+                        logger.bind(error=err).warning("manual_push_failed_retrying")
                         if not await self._run_pull():
                             return False, f"Push failed and pull-retry also failed: `{err}`"
                     else:
-                        logger.error("manual push failed: %s", err)
+                        logger.bind(error=err).error("manual_push_failed")
                         return False, f"Push failed: `{err}`"
             return False, "Push failed after retry."  # unreachable
 
     async def _run_git(self, note_count: int, error_callbacks: list[Callable[[str], Awaitable[None]]]):
         msg = f"telegram: add {note_count} note{'s' if note_count != 1 else ''}"
+        t0 = time.monotonic()
         try:
             # Pull first so our push won't be rejected
             pull_ok = await self._run_pull()
@@ -449,7 +462,7 @@ class GitSync:
             )
             await proc.communicate()
             if proc.returncode == 0:
-                logger.info("Nothing to commit, skipping")
+                logger.bind(note_count=note_count).info("git_sync_nothing_to_commit")
                 return
 
             proc = await asyncio.create_subprocess_exec(
@@ -461,7 +474,7 @@ class GitSync:
             stdout, stderr = await proc.communicate()
             if proc.returncode != 0:
                 err = stderr.decode().strip()
-                logger.error("git commit failed: %s", err)
+                logger.bind(success=False, error=err).error("git_commit_failed")
                 await self._notify_error(f"Git sync failed (commit): `{err}`", error_callbacks)
                 return
 
@@ -469,12 +482,13 @@ class GitSync:
             for attempt in range(2):
                 try:
                     await loop.run_in_executor(None, self._dulwich_push)
-                    logger.info("Git sync complete: %s", msg)
+                    duration_ms = int((time.monotonic() - t0) * 1000)
+                    logger.bind(duration_ms=duration_ms, success=True, note_count=note_count).info("git_sync_complete")
                     return
                 except Exception as e:
                     err = str(e)
                     if attempt == 0:
-                        logger.warning("git push failed, pulling and retrying: %s", err)
+                        logger.bind(success=False, error=err).warning("git_push_failed_retrying")
                         if not await self._run_pull():
                             await self._notify_error(
                                 f"Git sync failed (push + pull-retry failed): `{err}`",
@@ -482,10 +496,12 @@ class GitSync:
                             )
                             return
                     else:
-                        logger.error("git push failed: %s", err)
+                        duration_ms = int((time.monotonic() - t0) * 1000)
+                        logger.bind(duration_ms=duration_ms, success=False, error=err).error("git_push_failed")
                         await self._notify_error(
                             f"Git sync failed (push): `{err}`", error_callbacks
                         )
 
         except Exception:
-            logger.exception("Git sync error")
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            logger.bind(duration_ms=duration_ms, success=False).exception("git_sync_error")
