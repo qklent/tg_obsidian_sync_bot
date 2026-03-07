@@ -7,3 +7,4 @@ faiss-cpu>=1.7
 numpy>=1.24
 dulwich>=0.21
 aiohttp>=3.9
+loguru>=0.7

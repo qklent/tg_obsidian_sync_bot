@@ -1,5 +1,5 @@
+import asyncio
 import html as html_module
-import logging
 import random
 import time
 import uuid
@@ -14,14 +14,13 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
+from loguru import logger
 
 from bot.dedup import Deduplicator, DuplicatePair
 from bot.llm import LLMClassifier
 from bot.vault import VaultWriter
 from bot.git_sync import GitSync, PendingMerge
 from bot.web_fetch import augment_text_with_urls
-
-logger = logging.getLogger(__name__)
 
 router = Router()
 
@@ -30,11 +29,32 @@ _MAX_DEDUP_PREVIEW = 300
 _MAX_NOTE_PREVIEW = 600
 _SESSION_TIMEOUT = 1800  # 30 minutes
 
+_PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
+_KANBAN_FOLDER = "tg_sync_bot"
+_SKIP_FILES = {"board.md", "_template.md", "_codemap.md"}
+
 # Active dedup sessions: {session_id: DedupSession}
 _dedup_sessions: dict[str, dict] = {}
 
 # Active inbox review sessions: {session_id: {note_path, folders, created_at}}
 _inbox_sessions: dict[str, dict] = {}
+
+# Active clarify sessions: {user_id: {task_path, task_content, questions, created_at}}
+_clarify_sessions: dict[int, dict] = {}
+
+
+async def _run_script(script: str, *args: str, cwd: str) -> tuple[int, str]:
+    """Run a shell script with args and return (returncode, stdout)."""
+    proc = await asyncio.create_subprocess_exec(
+        script, *args,
+        cwd=cwd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        logger.bind(script=script, stderr=stderr.decode()).warning("script_stderr")
+    return proc.returncode, stdout.decode()
 
 
 def setup_handlers(
@@ -44,6 +64,7 @@ def setup_handlers(
     git_sync: GitSync,
     vault_structure: dict,
     allowed_user_ids: list[int],
+    project_dir: str = ".",
     deduplicator: Deduplicator | None = None,
 ):
     """Configure the router with all dependencies."""
@@ -91,6 +112,32 @@ def setup_handlers(
                 )
 
     git_sync.set_conflict_handler(handle_conflict)
+
+    # --- clarify answer handler (called from handle_text when session is active) ---
+
+    async def _handle_clarification_answer(message: Message, session: dict):
+        user_id = message.from_user.id
+        task_path = session["task_path"]
+        status_msg = await message.answer("Generating refined spec (Claude Opus)...")
+
+        returncode, output = await _run_script(
+            "./scripts/clarify-finalize.sh", task_path, message.text, cwd=project_dir
+        )
+
+        if returncode != 0:
+            await status_msg.edit_text("Failed to generate spec. Check logs.")
+            return
+
+        git_sync.mark_dirty()
+        del _clarify_sessions[user_id]
+
+        summary = output.strip()[:600] or "Spec generated and task queued."
+        await status_msg.edit_text(
+            f"✅ <b>{html_module.escape(Path(task_path).stem)}</b> refined and queued!\n\n"
+            f"{html_module.escape(summary)}\n\n"
+            f"<i>The pipeline will pick it up automatically.</i>",
+            parse_mode="HTML",
+        )
 
     @router.callback_query(F.data.startswith("mc:"))
     async def handle_conflict_resolution(callback: CallbackQuery):
@@ -143,7 +190,7 @@ def setup_handlers(
         try:
             pairs = await deduplicator.scan(on_progress, threshold=threshold)
         except Exception:
-            logger.exception("Dedup scan failed")
+            logger.exception("dedup_scan_failed")
             await status_msg.edit_text("Dedup scan failed. Check logs.")
             return
 
@@ -384,6 +431,49 @@ def setup_handlers(
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=next_btn) if remaining else None,
             )
 
+    # --- clarify command ---
+
+    @router.message(Command("clarify"))
+    async def handle_clarify(message: Message):
+        args = message.text.split()[1:]
+        filename = args[0] if args else None
+
+        task_path = _find_planning_task(vault_writer.repo_path, filename)
+        if not task_path:
+            if filename:
+                await message.reply(
+                    f"Task not found: <code>{html_module.escape(filename)}</code>",
+                    parse_mode="HTML",
+                )
+            else:
+                await message.reply("No planning tasks found in tg_sync_bot/")
+            return
+
+        status_msg = await message.answer(
+            f"Analyzing <code>{html_module.escape(task_path.name)}</code> (Claude Opus)...",
+            parse_mode="HTML",
+        )
+
+        returncode, output = await _run_script(
+            "./scripts/clarify-questions.sh", str(task_path), cwd=project_dir
+        )
+
+        if returncode != 0 or not output.strip():
+            await status_msg.edit_text("Failed to generate questions. Check logs.")
+            return
+
+        _clarify_sessions[message.from_user.id] = {
+            "task_path": str(task_path),
+            "created_at": time.monotonic(),
+        }
+
+        await status_msg.edit_text(
+            f"📋 <b>{html_module.escape(task_path.stem)}</b>\n\n"
+            f"{html_module.escape(output.strip())}\n\n"
+            f"<i>Reply with your answers (numbered to match the questions above).</i>",
+            parse_mode="HTML",
+        )
+
     # --- push command ---
 
     @router.message(Command("push"))
@@ -468,6 +558,17 @@ def setup_handlers(
 
     @router.message(F.text)
     async def handle_text(message: Message):
+        # Check for active clarify session first
+        user_id = message.from_user.id
+        session = _clarify_sessions.get(user_id)
+        if session:
+            if time.monotonic() - session["created_at"] > _SESSION_TIMEOUT:
+                del _clarify_sessions[user_id]
+                await message.reply("Clarification session expired. Use /clarify to start again.")
+                return
+            await _handle_clarification_answer(message, session)
+            return
+
         text = message.text
 
         # Handle forwarded messages
@@ -539,6 +640,44 @@ def _extract_forward_source(message: Message) -> str:
         return "unknown source"
 
 
+def _find_planning_task(vault_path: Path, filename: str | None = None) -> Path | None:
+    """Find a task to clarify. Filename takes priority; otherwise pick highest-priority planning task."""
+    notes_dir = vault_path / _KANBAN_FOLDER
+    if not notes_dir.exists():
+        return None
+
+    if filename:
+        if not filename.endswith(".md"):
+            filename += ".md"
+        candidate = notes_dir / filename
+        return candidate if candidate.exists() else None
+
+    planning_tasks: list[tuple[Path, str]] = []
+    for task_file in notes_dir.glob("*.md"):
+        if task_file.name in _SKIP_FILES:
+            continue
+        content = task_file.read_text(encoding="utf-8")
+        status = _extract_frontmatter_field(content, "status")
+        if status != "planning":
+            continue
+        priority = _extract_frontmatter_field(content, "priority") or "medium"
+        planning_tasks.append((task_file, priority))
+
+    if not planning_tasks:
+        return None
+
+    planning_tasks.sort(key=lambda x: _PRIORITY_ORDER.get(x[1], 1))
+    return planning_tasks[0][0]
+
+
+def _extract_frontmatter_field(content: str, field: str) -> str | None:
+    """Extract a field value from YAML frontmatter."""
+    for line in content.splitlines():
+        if line.startswith(f"{field}:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
 async def _classify_and_save(
     message: Message,
     text_for_llm: str,
@@ -552,7 +691,7 @@ async def _classify_and_save(
     try:
         result = await classifier.classify(text_for_llm, vault_structure)
     except Exception:
-        logger.exception("LLM classification failed")
+        logger.exception("llm_classification_failed")
         await message.reply("Failed to classify the message. Saved to inbox.")
         result = {
             "folder": "inbox",
@@ -577,6 +716,12 @@ async def _classify_and_save(
         priority=result.get("priority"),
         clarification_needed=result.get("clarification_needed"),
     )
+
+    logger.bind(
+        folder=result["folder"],
+        filename=note_path.name,
+        tags=tags,
+    ).info("message_classified")
 
     async def on_git_error(err: str):
         await message.answer(f"Note saved, but git sync failed: {err}")

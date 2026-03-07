@@ -1,18 +1,38 @@
 #!/bin/bash
 set -euo pipefail
 
+# Load .env if present (set -a exports all variables automatically)
+if [ -f ".env" ]; then
+    set -a
+    # shellcheck source=.env
+    source .env
+    set +a
+fi
+
 NOTES_DIR="${NOTES_DIR:-/home/qklent/programming/Notes/Notes/tg_sync_bot}"
 PROJECT_DIR="${PROJECT_DIR:-.}"
 TG_BOT_TOKEN="${TG_BOT_TOKEN:-}"
 TG_CHAT_ID="${TG_CHAT_ID:-}"
+TASK_ID="${TASK_ID:-}"
 LOG_FILE="./logs/pipeline-$(date +%Y%m%d-%H%M%S).log"
 
 mkdir -p ./logs
 
-# Telegram notification function
+
+# Structured JSON logging helper
+log_json() {
+    local level="$1" step="$2" msg="$3"
+    local line
+    line=$(printf '{"timestamp":"%s","level":"%s","task":"%s","step":"%s","message":"%s"}' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$level" "$TASK_ID" "$step" "$msg")
+    echo "$line" | tee -a "$LOG_FILE"
+}
+
+# Telegram notification (human-readable, separate from structured logs)
 notify() {
     local message="$1"
-    echo "[$(date '+%H:%M:%S')] $message" | tee -a "$LOG_FILE"
+    local step="${2:-notify}"
+    log_json "INFO" "$step" "$message"
     if [ -n "$TG_BOT_TOKEN" ] && [ -n "$TG_CHAT_ID" ]; then
         curl -s -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
             -d chat_id="$TG_CHAT_ID" \
@@ -33,7 +53,8 @@ update_field() {
     fi
 }
 
-notify "Pipeline started — scanning for todo tasks..."
+log_json "INFO" "startup" "Pipeline started — scanning for todo tasks..."
+
 
 processed=0
 failed=0
@@ -48,7 +69,8 @@ for task_file in "$NOTES_DIR"/*.md; do
     [ "$status" = "todo" ] || continue
 
     task_name=$(basename "$task_file" .md)
-    notify "Starting: $task_name"
+    TASK_ID="$task_name"
+    notify "Starting: $task_name" "start"
 
     # Update status
     update_field "$task_file" "status" "in-progress"
@@ -85,8 +107,8 @@ for task_file in "$NOTES_DIR"/*.md; do
         update_field "$task_file" "pr_url" "$PR_URL"
         ./scripts/sync-board.sh
 
-        notify "Ready for review: $task_name — $PR_URL"
-        ((processed++))
+        notify "Ready for review: $task_name — $PR_URL" "complete"
+        (( ++processed ))
     else
         # Retry logic
         retry_count=$(grep -m1 "^retry_count:" "$task_file" | awk '{print $2}' || echo "0")
@@ -96,17 +118,18 @@ for task_file in "$NOTES_DIR"/*.md; do
             new_count=$((retry_count + 1))
             update_field "$task_file" "retry_count" "$new_count"
             update_field "$task_file" "status" "todo"
-            notify "Retrying ($new_count/$max_retries): $task_name"
+            notify "Retrying ($new_count/$max_retries): $task_name" "retry"
         else
             update_field "$task_file" "status" "failed"
-            notify "Failed (max retries): $task_name — needs manual intervention"
+            notify "Failed (max retries): $task_name — needs manual intervention" "failed"
         fi
         ./scripts/sync-board.sh
-        ((failed++))
+        (( ++failed ))
     fi
 
     git checkout master
 done
 
 ./scripts/sync-board.sh
-notify "Pipeline complete: $processed succeeded, $failed failed"
+TASK_ID=""
+log_json "INFO" "summary" "Pipeline complete: $processed succeeded, $failed failed"

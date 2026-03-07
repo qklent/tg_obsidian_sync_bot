@@ -1,10 +1,7 @@
 import json
-import logging
 
-import yaml
+from loguru import logger
 from openai import AsyncOpenAI
-
-logger = logging.getLogger(__name__)
 
 
 def _folders_to_yaml(folders: list[dict], indent: int = 0) -> str:
@@ -72,6 +69,13 @@ class LLMClassifier:
             messages=[{"role": "user", "content": prompt}],
             temperature=0.1,
         )
+
+        if response.usage:
+            logger.bind(
+                tokens_prompt=response.usage.prompt_tokens,
+                tokens_completion=response.usage.completion_tokens,
+                tokens_total=response.usage.total_tokens,
+            ).info("llm_call")
 
         raw = response.choices[0].message.content.strip()
 
