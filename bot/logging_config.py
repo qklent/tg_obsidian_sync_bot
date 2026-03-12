@@ -142,8 +142,6 @@ def setup_logging(secrets: list[str] | None = None, log_dir: str = "logs") -> No
     logger.add(
         _make_file_sink(str(log_path)),
         level="INFO",
-        rotation="50 MB",
-        retention=5,
         colorize=False,
         format="{message}",
     )
