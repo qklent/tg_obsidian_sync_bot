@@ -170,6 +170,65 @@ class Deduplicator:
         pairs.sort(key=lambda p: p.similarity, reverse=True)
         return pairs
 
+    async def find_related(
+        self,
+        text: str,
+        top_k: int = 5,
+        threshold: float = 0.3,
+        exclude_path: Path | None = None,
+    ) -> list[tuple[Path, str, float]]:
+        """Find notes semantically related to the given text.
+
+        Returns list of (path, content_body, similarity) sorted by similarity desc.
+        """
+        notes = self._collect_notes()
+        if not notes:
+            return []
+
+        await self._update_embeddings(notes, progress_cb=None)
+
+        # Embed the query text
+        try:
+            response = await self.client.embeddings.create(
+                model=self.model, input=[text[:8000]]
+            )
+            query_vec = np.array([response.data[0].embedding], dtype=np.float32)
+        except Exception:
+            logger.exception("Failed to embed query text")
+            return []
+
+        # Build FAISS index from cached embeddings
+        valid_notes = [n for n in notes if n.content_hash in self._cache]
+        if not valid_notes:
+            return []
+
+        matrix = np.array(
+            [self._cache[n.content_hash] for n in valid_notes], dtype=np.float32
+        )
+        faiss.normalize_L2(matrix)
+        faiss.normalize_L2(query_vec)
+
+        index = faiss.IndexFlatIP(matrix.shape[1])
+        index.add(matrix)
+
+        k = min(top_k + 1, len(valid_notes))  # +1 to account for possible self-match
+        similarities, indices = index.search(query_vec, k)
+
+        results: list[tuple[Path, str, float]] = []
+        for col in range(k):
+            idx = int(indices[0][col])
+            sim = float(similarities[0][col])
+            if sim < threshold:
+                continue
+            note = valid_notes[idx]
+            if exclude_path and note.path == exclude_path:
+                continue
+            results.append((note.path, note.content, sim))
+            if len(results) >= top_k:
+                break
+
+        return results
+
     async def scan(
         self,
         progress_cb: Callable[[int, int], Awaitable[None]] | None = None,
