@@ -108,6 +108,77 @@ class VaultWriter:
         logger.info("Moved note: %s → %s", src_path, dest_path)
         return dest_path
 
+    def generate_index(self) -> Path:
+        """Scan all notes and generate an index.md catalog."""
+        entries: list[tuple[str, str, list[str]]] = []  # (rel_path, title, tags)
+        skip_dirs = {".obsidian", ".tg_sync_cache", ".git", "images"}
+
+        for md_path in sorted(self.repo_path.rglob("*.md")):
+            rel = md_path.relative_to(self.repo_path)
+            if any(part in skip_dirs for part in rel.parts):
+                continue
+            if rel.name in ("index.md", "_template.md", "_codemap.md", "board.md"):
+                continue
+
+            content = md_path.read_text(encoding="utf-8")
+            title = rel.stem  # default
+            tags: list[str] = []
+
+            # Parse frontmatter
+            lines = content.splitlines()
+            if lines and lines[0].strip() == "---":
+                in_fm = True
+                for line in lines[1:]:
+                    if line.strip() == "---":
+                        break
+                    if line.strip().startswith("- ") and tags is not None:
+                        tags.append(line.strip().lstrip("- ").strip())
+                    elif line.startswith("tags:"):
+                        tags = []  # start collecting
+
+            # Try to get title from first heading
+            for line in lines:
+                if line.startswith("# "):
+                    title = line[2:].strip()
+                    break
+
+            entries.append((str(rel), title, tags))
+
+        # Group by top-level folder
+        from collections import defaultdict
+        groups: dict[str, list[tuple[str, str, list[str]]]] = defaultdict(list)
+        for rel_path, title, tags in entries:
+            folder = rel_path.split("/")[0] if "/" in rel_path else "root"
+            groups[folder].append((rel_path, title, tags))
+
+        # Render index
+        lines_out = ["# Vault Index", "",
+                      f"*Auto-generated on {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}*",
+                      f"*{len(entries)} notes total*", ""]
+
+        for folder in sorted(groups.keys()):
+            lines_out.append(f"## {folder}")
+            lines_out.append("")
+            for rel_path, title, tags in sorted(groups[folder]):
+                tags_str = " ".join(f"`{t}`" for t in tags[:4]) if tags else ""
+                lines_out.append(f"- [[{rel_path.removesuffix('.md')}|{title}]] {tags_str}")
+            lines_out.append("")
+
+        index_path = self.repo_path / "index.md"
+        index_path.write_text("\n".join(lines_out), encoding="utf-8")
+        logger.info("Generated index.md with %d entries", len(entries))
+        return index_path
+
+    def append_wikilinks(self, note_path: Path, linked_stems: list[str]) -> None:
+        """Append a 'Related' section with wikilinks to an existing note."""
+        if not linked_stems:
+            return
+        links = " · ".join(f"[[{stem}]]" for stem in linked_stems)
+        section = f"\n\n---\n**Related:** {links}\n"
+        with note_path.open("a", encoding="utf-8") as f:
+            f.write(section)
+        logger.info("Added %d wikilinks to %s", len(linked_stems), note_path.name)
+
     def save_attachment(self, file_bytes: bytes, filename: str) -> str:
         """Save an attachment file and return the vault-relative path."""
         attach_dir = self.repo_path / self.attachments_dir

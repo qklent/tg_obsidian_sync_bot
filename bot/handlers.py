@@ -508,6 +508,7 @@ def setup_handlers(
             git_sync,
             vault_structure,
             extra_content=f"\n\n![[{vault_path}]]",
+            deduplicator=deduplicator,
         )
 
     @router.message(F.document)
@@ -531,6 +532,7 @@ def setup_handlers(
             git_sync,
             vault_structure,
             extra_content=f"\n\n![[{vault_path}]]",
+            deduplicator=deduplicator,
         )
 
     @router.message(F.voice)
@@ -554,7 +556,75 @@ def setup_handlers(
             vault_structure,
             extra_content=f"\n\n![[{vault_path}]]",
             extra_tags=["voice"],
+            deduplicator=deduplicator,
         )
+
+    # --- query command ---
+
+    @router.message(Command("query"))
+    async def handle_query(message: Message):
+        if deduplicator is None:
+            await message.reply("Query requires deduplication to be configured.")
+            return
+
+        question = message.text.partition(" ")[2].strip()
+        if not question:
+            await message.reply("Usage: /query <your question about your notes>")
+            return
+
+        status_msg = await message.answer("Searching vault...")
+
+        try:
+            related = await deduplicator.find_related(question, top_k=8, threshold=0.25)
+        except Exception:
+            logger.exception("query_search_failed")
+            await status_msg.edit_text("Search failed. Check logs.")
+            return
+
+        if not related:
+            await status_msg.edit_text("No relevant notes found for your question.")
+            return
+
+        await status_msg.edit_text(
+            f"Found {len(related)} relevant notes. Synthesizing answer..."
+        )
+
+        context_notes = [
+            (str(path.relative_to(vault_writer.repo_path)), body)
+            for path, body, _sim in related
+        ]
+
+        try:
+            answer = await classifier.query(question, context_notes)
+        except Exception:
+            logger.exception("query_llm_failed")
+            await status_msg.edit_text("Failed to generate answer. Check logs.")
+            return
+
+        sources = "\n".join(
+            f"  `{path.relative_to(vault_writer.repo_path)}` ({sim:.0%})"
+            for path, _body, sim in related[:5]
+        )
+        await status_msg.edit_text(
+            f"{answer}\n\n<b>Sources:</b>\n{html_module.escape(sources)}",
+            parse_mode=ParseMode.HTML,
+        )
+
+    # --- index command ---
+
+    @router.message(Command("index"))
+    async def handle_index(message: Message):
+        status_msg = await message.answer("Generating vault index...")
+        try:
+            index_path = vault_writer.generate_index()
+            git_sync.mark_dirty()
+            count = index_path.read_text(encoding="utf-8").count("- [[")
+            await status_msg.edit_text(
+                f"Index updated with {count} entries. Saved to `index.md`."
+            )
+        except Exception:
+            logger.exception("index_generation_failed")
+            await status_msg.edit_text("Failed to generate index. Check logs.")
 
     @router.message(F.text)
     async def handle_text(message: Message):
@@ -580,7 +650,8 @@ def setup_handlers(
         text_for_llm = await augment_text_with_urls(text)
 
         await _classify_and_save(
-            message, text_for_llm, classifier, vault_writer, git_sync, vault_structure
+            message, text_for_llm, classifier, vault_writer, git_sync, vault_structure,
+            deduplicator=deduplicator,
         )
 
     return router
@@ -687,6 +758,7 @@ async def _classify_and_save(
     vault_structure: dict,
     extra_content: str = "",
     extra_tags: list[str] | None = None,
+    deduplicator: Deduplicator | None = None,
 ):
     try:
         result = await classifier.classify(text_for_llm, vault_structure)
@@ -717,10 +789,29 @@ async def _classify_and_save(
         clarification_needed=result.get("clarification_needed"),
     )
 
+    # Cross-referencing: find related notes and add wikilinks
+    linked_stems: list[str] = []
+    if deduplicator is not None:
+        try:
+            related = await deduplicator.find_related(
+                result["content"], top_k=5, threshold=0.35, exclude_path=note_path
+            )
+            if related:
+                candidates = [
+                    (r[0].stem, r[1][:200]) for r in related
+                ]
+                linked_stems = await classifier.suggest_wikilinks(
+                    result["title"], result["content"], candidates
+                )
+                vault_writer.append_wikilinks(note_path, linked_stems)
+        except Exception:
+            logger.exception("cross_referencing_failed")
+
     logger.bind(
         folder=result["folder"],
         filename=note_path.name,
         tags=tags,
+        linked=len(linked_stems),
     ).info("message_classified")
 
     async def on_git_error(err: str):
@@ -731,4 +822,5 @@ async def _classify_and_save(
     relative_path = note_path.name
     folder = result["folder"]
     tags_str = " ".join(f"#{t}" for t in tags)
-    await message.reply(f"Saved to `{folder}/{relative_path}` with tags: {tags_str}")
+    links_info = f" | {len(linked_stems)} links" if linked_stems else ""
+    await message.reply(f"Saved to `{folder}/{relative_path}` with tags: {tags_str}{links_info}")

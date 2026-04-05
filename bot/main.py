@@ -78,6 +78,8 @@ async def main():
         BotCommand(command="deduplicate", description="Scan vault for duplicates (optional: threshold, e.g. 0.9)"),
         BotCommand(command="review", description="Review and file notes from your inbox"),
         BotCommand(command="push", description="Manually trigger git push"),
+        BotCommand(command="query", description="Ask a question across your vault notes"),
+        BotCommand(command="index", description="Regenerate the vault index.md catalog"),
     ])
 
     logger.info("Bot starting...")
