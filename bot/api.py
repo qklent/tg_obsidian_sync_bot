@@ -102,7 +102,7 @@ async def handle_task_create(request: web.Request) -> web.Response:
     git_sync.mark_dirty()
 
     # Send Telegram notification
-    await _notify(request, f"📋 Task created: **{req.task_id}** {req.title}\nProject: {req.project} | Status: {req.status}")
+    await _notify(request, f"📋 Task created: <b>{req.task_id}</b> {req.title}\nProject: {req.project} | Status: {req.status}")
 
     return _ok({"path": str(note_path.relative_to(project_sync.vault_path))})
 
@@ -140,7 +140,7 @@ async def handle_task_update(request: web.Request) -> web.Response:
     git_sync.mark_dirty()
 
     emoji = {"done": "✅", "in-progress": "⚙️", "review": "👀", "failed": "❌", "todo": "📥", "planning": "📋"}.get(req.new_status, "🔄")
-    await _notify(request, f"{emoji} Task updated: **{req.task_id}** → {req.new_status}\nProject: {req.project}")
+    await _notify(request, f"{emoji} Task updated: <b>{req.task_id}</b> → {req.new_status}\nProject: {req.project}")
 
     return _ok({"path": str(note_path.relative_to(project_sync.vault_path))})
 
@@ -165,7 +165,7 @@ async def handle_changelog_sync(request: web.Request) -> web.Response:
         return _error(f"Failed to sync changelog: {e}", status=500)
 
     git_sync.mark_dirty()
-    await _notify(request, f"📝 Changelog synced for **{req.project}**")
+    await _notify(request, f"📝 Changelog synced for <b>{req.project}</b>")
 
     return _ok({"path": str(path.relative_to(project_sync.vault_path))})
 
@@ -190,7 +190,7 @@ async def handle_changes_sync(request: web.Request) -> web.Response:
         return _error(f"Failed to sync changes: {e}", status=500)
 
     git_sync.mark_dirty()
-    await _notify(request, f"📝 Changes synced for **{req.project}**")
+    await _notify(request, f"📝 Changes synced for <b>{req.project}</b>")
 
     return _ok({"path": str(path.relative_to(project_sync.vault_path))})
 
@@ -201,7 +201,7 @@ async def _notify(request: web.Request, text: str) -> None:
     chat_id = request.app.get("notify_chat_id")
     if bot and chat_id:
         try:
-            await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+            await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
         except Exception:
             logger.exception("telegram_notification_failed")
 
