@@ -6,10 +6,22 @@ services:
     volumes:
       - /notes:/vault
       - ./config:/app/config
+    ports:
+      - "8443:8443"
     environment:
       - TG_BOT_TOKEN
       - OPENROUTER_API_KEY
       - GITHUB_TOKEN
+      - API_SECRET
+    networks:
+      - botnet
+
+networks:
+  botnet:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 192.168.200.0/24
 
 volumes:
   vault_repo:

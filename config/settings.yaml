@@ -18,3 +18,13 @@ dedup:
   embedding_model: "openai/text-embedding-3-small"
   similarity_threshold: 0.90
   cache_path: ".tg_sync_cache/embeddings.json"
+
+api:
+  port: 8443
+  secret: "${API_SECRET}"
+  board_path: "tg_sync_bot/board.md"
+  projects_dir: "projects"
+  notify_chat_id: 470241971
+
+pipeline:
+  project_dir: "/home/qklent/programming/tg_obsidian_sync"
